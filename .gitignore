@@ -216,3 +216,19 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Private local datasets/images
+private/
+# Private local datasets/images
+outputs/
+
+# IntelliJ / JetBrains IDE
+.idea/
+*.iml
+
+# Maven build output
+target/

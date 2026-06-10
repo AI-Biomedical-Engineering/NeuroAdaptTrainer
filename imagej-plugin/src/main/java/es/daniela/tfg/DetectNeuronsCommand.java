@@ -5,7 +5,7 @@ import ij.ImagePlus;
 import ij.WindowManager;
 import ij.io.FileSaver;
 import ij.gui.OvalRoi;
-import ij.plugin.frame.RoiManager;
+import ij.gui.Overlay;
 
 import org.scijava.command.Command;
 import org.scijava.plugin.Plugin;
@@ -20,7 +20,7 @@ import java.awt.Color;
 public class DetectNeuronsCommand implements Command {
 
     private static final String PYTHON_EXE = "/Users/danielaerasocasas/tfg/venv/bin/python3";
-    private static final String SCRIPT_PATH = "/Users/danielaerasocasas/tfg/infer_one.py";
+    private static final String SCRIPT_PATH = "/Users/danielaerasocasas/Documents/gitHub/fiji-yolo-neuron-segmentation/yolo-inference/infer_one.py";
 
     @Override
     public void run() {
@@ -96,76 +96,95 @@ public class DetectNeuronsCommand implements Command {
                 return;
             }
 
-            result.setTitle("Detected Neurons");
-            result.show();
+            int detectedFromCsv = loadDetectionsAsOverlay(result);
 
-            loadDetectionsAsROIs(result);
+            int finalCount = neuronCount >= 0 ? neuronCount : detectedFromCsv;
 
-            if (neuronCount >= 0) {
-                IJ.showMessage("Neuron Detection", "Detected neurons: " + neuronCount);
+            if (finalCount >= 0) {
+                result.setTitle("Detected Neurons - " + finalCount + " neurons");
+            } else {
+                result.setTitle("Detected Neurons");
             }
 
+            result.show();
+
+            if (finalCount >= 0) {
+                IJ.showStatus("Detected neurons: " + finalCount);
+                IJ.showMessage("Neuron Detection", "Detected neurons: " + finalCount);
+            }
         } catch (Exception e) {
             IJ.handleException(e);
         }
     }
 
-    private void loadDetectionsAsROIs(ImagePlus imp) {
+    private int loadDetectionsAsOverlay(ImagePlus imp) {
+        int count = 0;
+
         try {
             String tmpDir = System.getProperty("java.io.tmpdir");
             File csvFile = new File(tmpDir, "imagej_output.csv");
 
             if (!csvFile.exists()) {
                 IJ.log("CSV not found: " + csvFile.getAbsolutePath());
-                return;
+                return -1;
             }
 
-            RoiManager rm = RoiManager.getInstance();
-            if (rm == null) rm = new RoiManager();
+            Overlay overlay = new Overlay();
 
-            // Remove previous automatic ROIs detections only
-            for (int i = rm.getCount() - 1; i >= 0; i--) {
-                String roiName = rm.getName(i);
-                if (roiName != null && roiName.startsWith("AUTO_")) {
-                    rm.select(i);
-                    rm.runCommand("Delete");
+            try (BufferedReader br = new BufferedReader(new FileReader(csvFile))) {
+                String line = br.readLine(); // skip header
+
+                while ((line = br.readLine()) != null) {
+                    String[] parts = line.split(",");
+
+                    if (parts.length < 3) {
+                        IJ.log("Skipping malformed CSV line: " + line);
+                        continue;
+                    }
+
+                    double cx = Double.parseDouble(parts[0]);
+                    double cy = Double.parseDouble(parts[1]);
+                    double r = Double.parseDouble(parts[2]);
+
+                    double x = cx - r;
+                    double y = cy - r;
+                    double d = r * 2;
+
+                    // Circle around the detected neuron
+                    OvalRoi circle = new OvalRoi(x, y, d, d);
+                    circle.setStrokeColor(Color.BLUE);
+                    circle.setStrokeWidth(1.5);
+                    circle.setName("AUTO_" + (count + 1));
+                    overlay.add(circle);
+
+                    // Small center dot
+                    double dotRadius = 1.8;
+                    OvalRoi centerDot = new OvalRoi(
+                            cx - dotRadius,
+                            cy - dotRadius,
+                            dotRadius * 2,
+                            dotRadius * 2
+                    );
+                    centerDot.setStrokeColor(Color.BLUE);
+                    centerDot.setFillColor(Color.BLUE);
+                    centerDot.setName("CENTER_" + (count + 1));
+                    overlay.add(centerDot);
+
+                    count++;
                 }
             }
 
-            BufferedReader br = new BufferedReader(new FileReader(csvFile));
-            String line = br.readLine(); // skip header
+            imp.setOverlay(overlay);
+            imp.updateAndDraw();
 
-            int autoIndex = 1;
-
-            while ((line = br.readLine()) != null) {
-                String[] parts = line.split(",");
-
-                double cx = Double.parseDouble(parts[0]);
-                double cy = Double.parseDouble(parts[1]);
-                double r = Double.parseDouble(parts[2]);
-
-                double x = cx - r;
-                double y = cy - r;
-                double d = r * 2;
-
-                OvalRoi roi = new OvalRoi(x, y, d, d);
-                roi.setStrokeColor(Color.BLUE);
-                roi.setStrokeWidth(1.5);
-                roi.setName("AUTO_" + autoIndex);
-
-                rm.addRoi(roi);
-                autoIndex++;
-            }
-
-            br.close();
-
-            RoiOverlayUpdater.updateOverlay(imp);
-
-            IJ.log("Automatic detections loaded from CSV");
+            IJ.log("Automatic detections loaded as overlay. Count: " + count);
 
         } catch (Exception e) {
             IJ.handleException(e);
+            return -1;
         }
+
+        return count;
     }
 
 }

@@ -15,7 +15,6 @@ is written there. Additionally, a stable and a timestamped output are
 stored inside the project outputs directory.
 """
 from ultralytics import YOLO
-from datetime import datetime
 from pathlib import Path
 import sys
 import cv2
@@ -29,7 +28,7 @@ import traceback
 ROOT = Path(__file__).resolve().parent
 
 # Absolute model path to avoid relying on "cwd" when called from Fiji.
-MODEL_PATH = ROOT / "runs/segment/200_AllExperts_rotated_2025_5_15/weights/best.pt"
+MODEL_PATH = ROOT / "models" / "best.pt"
 
 # -----------------------------------------------------------------------------
 # Inference / Visualization configuration
@@ -254,23 +253,16 @@ def main():
             csv_path = stable_dir / "imagej_output.csv"
             save_detections_csv(csv_path, items)
             print(f"CSV detections saved to: {csv_path}", flush=True)
-
-        # Write stable output inside the project (useful for debugging and manual inspection).
-        stable_out = (ROOT / "outputs" / "latest_neurons_clean.png")
-        safe_imwrite(stable_out, image_bgr)
-        print(f"Stable output saved to: {stable_out}", flush=True)
-
-        # Write Fiji temporary output (this is the file the macro opens).
+        # Write Fiji temporary output. This is the file opened by the Java plugin.
         if out_override:
             safe_imwrite(out_override, image_bgr)
-            print(f"Override output saved to: {out_override}", flush=True)
-
-        # Write a timestamped output for traceability.
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        versioned_out = (ROOT / "outputs" / f"neurons_{ts}.png")
-        safe_imwrite(versioned_out, image_bgr)
-        print(f"Versioned output saved to: {versioned_out}", flush=True)
-
+            print(f"Output saved to: {out_override}", flush=True)
+        else:
+            # Manual execution fallback: only save to outputs if no output path was provided.
+            stable_out = ROOT / "outputs" / "latest_neurons_clean.png"
+            safe_imwrite(stable_out, image_bgr)
+            print(f"Output saved to: {stable_out}", flush=True)
+                
     except Exception:
         # Print the full traceback so Fiji can display the real error.
         print("ERROR in infer_one.py:", file=sys.stderr, flush=True)
