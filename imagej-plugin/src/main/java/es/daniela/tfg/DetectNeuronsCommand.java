@@ -20,7 +20,7 @@ import java.awt.Color;
 public class DetectNeuronsCommand implements Command {
 
     private static final String PYTHON_EXE = "/Users/danielaerasocasas/tfg/venv/bin/python3";
-    private static final String SCRIPT_PATH = "/Users/danielaerasocasas/tfg/infer_one.py";
+    private static final String SCRIPT_PATH = "/Users/danielaerasocasas/Documents/gitHub/fiji-yolo-neuron-segmentation/yolo-inference/infer_one.py";
 
     @Override
     public void run() {

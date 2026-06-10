@@ -223,6 +223,8 @@ __marimo__/
 
 # Private local datasets/images
 private/
+# Private local datasets/images
+outputs/
 
 # IntelliJ / JetBrains IDE
 .idea/

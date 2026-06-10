@@ -29,7 +29,7 @@ import traceback
 ROOT = Path(__file__).resolve().parent
 
 # Absolute model path to avoid relying on "cwd" when called from Fiji.
-MODEL_PATH = ROOT / "runs/segment/200_AllExperts_rotated_2025_5_15/weights/best.pt"
+MODEL_PATH = ROOT / "models" / "best.pt"
 
 # -----------------------------------------------------------------------------
 # Inference / Visualization configuration
