@@ -5,6 +5,7 @@ import ij.ImagePlus;
 import ij.WindowManager;
 import ij.io.FileSaver;
 import ij.process.ImageProcessor;
+import ij.ImageListener;
 
 import org.scijava.command.Command;
 import org.scijava.plugin.Plugin;
@@ -12,12 +13,14 @@ import org.scijava.plugin.Plugin;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.image.BufferedImage;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 import java.io.*;
 import java.util.ArrayList;
 import java.util.List;
 
 @Plugin(type = Command.class, menuPath = "Plugins>TFG>Neuron Segmentation Assistant Window")
-public class NeuronSegmentationAssistantWindowCommand implements Command {
+public class NeuronSegmentationAssistantWindowCommand implements Command, ImageListener {
 
     private static final String PYTHON_EXE =
             "/Users/danielaerasocasas/tfg/venv/bin/python3";
@@ -43,6 +46,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command {
     private double zoomFactor = 1.0;
     private boolean fitToPanel = true;
 
+    private JButton importImageButton;
     private JButton deleteSelectedButton;
     private JButton addNeuronButton;
     private boolean addNeuronMode = false;
@@ -82,6 +86,15 @@ public class NeuronSegmentationAssistantWindowCommand implements Command {
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
 
+        ImagePlus.addImageListener(this);
+
+        frame.addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosed(WindowEvent e) {
+                ImagePlus.removeImageListener(NeuronSegmentationAssistantWindowCommand.this);
+            }
+        });
+
         if (sourceImage != null) {
             imageToDisplay = sourceImage;
             updateStatus("Selected image: " + sourceImage.getTitle());
@@ -107,6 +120,34 @@ public class NeuronSegmentationAssistantWindowCommand implements Command {
         }
 
         return null;
+    }
+
+    private void setSourceImage(ImagePlus image, String message) {
+        if (image == null) {
+            updateStatus("No image selected.");
+            return;
+        }
+
+        sourceImage = image;
+        imageToDisplay = sourceImage;
+        detectedImage = null;
+
+        detections.clear();
+        roiListModel.clear();
+        selectedDetectionIndex = -1;
+
+        correctionMode = false;
+        addNeuronMode = false;
+
+        if (addNeuronButton != null) {
+            addNeuronButton.setText("2.2 Add neurons");
+        }
+
+        fitToPanel = true;
+
+        updateStatus(message + ": " + sourceImage.getTitle());
+        updateButtonState();
+        updateDisplayedImage(false);
     }
 
     private JPanel createLeftPanel() {
@@ -205,13 +246,14 @@ public class NeuronSegmentationAssistantWindowCommand implements Command {
     private JPanel createRightPanel() {
         JPanel panel = new JPanel();
         panel.setPreferredSize(new Dimension(190, 0));
-        panel.setLayout(new GridLayout(8, 1, 8, 8));
+        panel.setLayout(new GridLayout(7, 1, 8, 8));
         panel.setBorder(BorderFactory.createTitledBorder("Actions"));
 
+        importImageButton = new JButton("0. Import image");
         detectButton = new JButton("1. Detect neurons");
-        correctButton = new JButton("2. Review / correct detections");
-        deleteSelectedButton = new JButton("2.1 Delete selected neuron");
-        addNeuronButton = new JButton("2.2 Add missing neurons");
+        correctButton = new JButton("2. Correct detections");
+        deleteSelectedButton = new JButton("2.1 Delete neuron");
+        addNeuronButton = new JButton("2.2 Add neurons");
         saveButton = new JButton("2.3 Save corrections");
         retrainButton = new JButton("3. Retrain model");
 
@@ -231,7 +273,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command {
             addNeuronMode = !addNeuronMode;
 
             if (addNeuronMode) {
-                addNeuronButton.setText("Stop adding neurons");
+                addNeuronButton.setText("2.2 Stop adding neurons");
                 updateStatus("Add neuron mode enabled. Click and drag to add neurons. You can still delete the selected neuron.");
             } else {
                 addNeuronButton.setText("Add neuron mode");
@@ -245,6 +287,9 @@ public class NeuronSegmentationAssistantWindowCommand implements Command {
             }
         });
 
+        importImageButton.addActionListener(e -> importImageFromFile());
+
+        panel.add(importImageButton);
         panel.add(detectButton);
         panel.add(correctButton);
         panel.add(deleteSelectedButton);
@@ -253,6 +298,28 @@ public class NeuronSegmentationAssistantWindowCommand implements Command {
         panel.add(retrainButton);
 
         return panel;
+    }
+
+    private void importImageFromFile() {
+        JFileChooser chooser = new JFileChooser();
+
+        int result = chooser.showOpenDialog(frame);
+
+        if (result != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+
+        File selectedFile = chooser.getSelectedFile();
+
+        ImagePlus importedImage = IJ.openImage(selectedFile.getAbsolutePath());
+
+        if (importedImage == null) {
+            IJ.error("Could not open selected image.");
+            return;
+        }
+
+        importedImage.show();
+        setSourceImage(importedImage, "Imported image");
     }
 
     private JPanel createBottomPanel() {
@@ -278,8 +345,12 @@ public class NeuronSegmentationAssistantWindowCommand implements Command {
     private void updateButtonState() {
         boolean hasDetections = !detections.isEmpty();
 
+        if (importImageButton != null) {
+            importImageButton.setEnabled(!correctionMode && !addNeuronMode);
+        }
+
         // Detect only when there are no current detections and we are not adding/correcting.
-        detectButton.setEnabled(!hasDetections && !correctionMode && !addNeuronMode);
+        detectButton.setEnabled(sourceImage != null && !hasDetections && !correctionMode && !addNeuronMode);
 
         // After detection, user can enter correction mode.
         correctButton.setEnabled(hasDetections && !correctionMode && !addNeuronMode);
@@ -298,7 +369,15 @@ public class NeuronSegmentationAssistantWindowCommand implements Command {
     }
 
     private void detectNeurons() {
-        ImagePlus currentImage = sourceImage != null ? sourceImage : getCurrentOrFirstImage();
+        ImagePlus currentImage = sourceImage;
+
+        if (currentImage == null) {
+            currentImage = getCurrentOrFirstImage();
+
+            if (currentImage != null) {
+                setSourceImage(currentImage, "Selected image");
+            }
+        }
 
         if (currentImage == null) {
             IJ.error("No image is open in Fiji.");
@@ -306,6 +385,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command {
         }
 
         sourceImage = currentImage;
+        final ImagePlus imageForDetection = currentImage;
         IJ.log("Assistant selected source image: " + sourceImage.getTitle());
 
         detectButton.setEnabled(false);
@@ -324,7 +404,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command {
 
         new Thread(() -> {
             try {
-                DetectionResult result = runPythonDetection(currentImage);
+                DetectionResult result = runPythonDetection(imageForDetection);
                 detectedImage = result.image;
 
                 loadDetectionsFromCsv();
@@ -424,7 +504,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command {
         addNeuronMode = false;
         selectedDetectionIndex = -1;
 
-        addNeuronButton.setText("Add neuron mode");
+        addNeuronButton.setText("2.2 Add neurons");
         roiList.clearSelection();
 
         updateStatus("Correction mode enabled. Click a neuron to select it, drag to move it, delete it, or add a new one.");
@@ -547,7 +627,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command {
         addNeuronMode = false;
         selectedDetectionIndex = -1;
 
-        addNeuronButton.setText("Add neuron mode");
+        addNeuronButton.setText("2.2 Add neurons");
         roiList.clearSelection();
 
         updateStatus("Corrections saved. You can correct again or retrain the model.");
@@ -640,6 +720,53 @@ public class NeuronSegmentationAssistantWindowCommand implements Command {
         if (file.exists() && !file.delete()) {
             IJ.log("Warning: previous file could not be deleted: " + file.getAbsolutePath());
         }
+    }
+
+    @Override
+    public void imageOpened(ImagePlus imp) {
+        SwingUtilities.invokeLater(() -> {
+            if (imp == null) {
+                return;
+            }
+
+            if (correctionMode || addNeuronMode) {
+                return;
+            }
+
+            if (!detections.isEmpty()) {
+                return;
+            }
+
+            setSourceImage(imp, "Image opened in Fiji");
+        });
+    }
+
+    @Override
+    public void imageClosed(ImagePlus imp) {
+        SwingUtilities.invokeLater(() -> {
+            if (imp != null && imp == sourceImage) {
+                sourceImage = null;
+                imageToDisplay = null;
+                detectedImage = null;
+
+                detections.clear();
+                roiListModel.clear();
+                selectedDetectionIndex = -1;
+
+                updateStatus("Selected image was closed.");
+                updateButtonState();
+
+                if (imagePanel != null) {
+                    imagePanel.setImage(null, 640, 480);
+                    imagePanel.repaint();
+                }
+            }
+        });
+    }
+
+    @Override
+    public void imageUpdated(ImagePlus imp) {
+        // Not needed for now.
     }
 
     private static class DetectionResult {
