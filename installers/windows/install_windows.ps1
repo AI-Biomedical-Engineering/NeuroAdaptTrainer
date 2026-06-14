@@ -49,11 +49,18 @@ Write-Host "Creating configuration file..."
 
 New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
 
-@"
-python=$PythonExe
-script=$InferScript
-retrain_script=$RetrainScript
-"@ | Set-Content -Path $ConfigFile -Encoding UTF8
+$PythonConfig = $PythonExe.Replace("\", "/")
+$InferConfig = $InferScript.Replace("\", "/")
+$RetrainConfig = $RetrainScript.Replace("\", "/")
+
+$ConfigContent = @"
+python=$PythonConfig
+script=$InferConfig
+retrain_script=$RetrainConfig
+"@
+
+$Utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+[System.IO.File]::WriteAllText($ConfigFile, $ConfigContent, $Utf8NoBom)
 
 Write-Host ""
 Write-Host "Installation completed successfully."

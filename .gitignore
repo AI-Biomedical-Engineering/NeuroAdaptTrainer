@@ -226,9 +226,12 @@ private/
 # Private local datasets/images
 outputs/
 
+
+
 # IntelliJ / JetBrains IDE
 .idea/
 *.iml
 
 # Maven build output
 target/
+installers/windows/build_windows_exe.ps1
