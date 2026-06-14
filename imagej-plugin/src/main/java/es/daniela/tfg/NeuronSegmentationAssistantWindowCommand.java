@@ -635,11 +635,21 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         }
 
         ImagePlus displayImage = imageToDisplay;
-        ImageProcessor processor = displayImage.getProcessor();
-        BufferedImage bufferedImage = processor.getBufferedImage();
 
-        int originalWidth = bufferedImage.getWidth();
-        int originalHeight = bufferedImage.getHeight();
+        Image awtImage = displayImage.getImage();
+
+        int originalWidth = displayImage.getWidth();
+        int originalHeight = displayImage.getHeight();
+
+        BufferedImage bufferedImage = new BufferedImage(
+                originalWidth,
+                originalHeight,
+                BufferedImage.TYPE_INT_RGB
+        );
+
+        Graphics2D g2 = bufferedImage.createGraphics();
+        g2.drawImage(awtImage, 0, 0, null);
+        g2.dispose();
 
         int targetWidth;
         int targetHeight;
