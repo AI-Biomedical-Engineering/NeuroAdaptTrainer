@@ -4,7 +4,6 @@ import ij.IJ;
 import ij.ImagePlus;
 import ij.WindowManager;
 import ij.io.FileSaver;
-import ij.process.ImageProcessor;
 import ij.ImageListener;
 
 import org.scijava.command.Command;
@@ -22,20 +21,18 @@ import java.util.UUID;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.Properties;
 
 @Plugin(type = Command.class, menuPath = "Plugins>TFG>Neuron Segmentation Assistant Window")
 public class NeuronSegmentationAssistantWindowCommand implements Command, ImageListener {
 
-    private static final String PYTHON_EXE =
-            "/Users/danielaerasocasas/tfg/venv/bin/python3";
-
-    private static final String SCRIPT_PATH =
-            "/Users/danielaerasocasas/Documents/gitHub/fiji-yolo-neuron-segmentation/yolo-inference/infer_one.py";
+    private String pythonExe;
+    private String scriptPath;
+    private String retrainScriptPath;
 
     private JFrame frame;
     private DefaultListModel<String> roiListModel;
     private JList<String> roiList;
-    private JLabel imageLabel;
     private JLabel statusLabel;
 
     private JScrollPane imageScrollPane;
@@ -56,6 +53,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
     private boolean addNeuronMode = false;
     private boolean correctionMode = false;
     private boolean detectionRunning = false;
+    private boolean retrainingRunning = false;
     private String currentMessage = "Ready.";
 
     private ImagePanel imagePanel;
@@ -82,6 +80,8 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
     }
 
     private void createWindow() {
+        loadConfiguration();
+
         sessionDir = new File(
                 System.getProperty("java.io.tmpdir"),
                 "neuron_assistant_" + sessionId
@@ -129,6 +129,55 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         } else {
             updateStatus("No Fiji image selected.");
             updateButtonState();
+        }
+    }
+
+    private void loadConfiguration() {
+        try {
+            File configFile = new File(
+                    System.getProperty("user.home"),
+                    ".neuron-segmentation-assistant/config.properties"
+            );
+
+            if (!configFile.exists()) {
+                IJ.error(
+                        "Configuration not found",
+                        "Config file not found:\n" +
+                                configFile.getAbsolutePath() +
+                                "\n\nPlease run the installer first."
+                );
+                return;
+            }
+
+            Properties properties = new Properties();
+
+            try (FileInputStream fis = new FileInputStream(configFile)) {
+                properties.load(fis);
+            }
+
+            pythonExe = properties.getProperty("python");
+            scriptPath = properties.getProperty("script");
+            retrainScriptPath = properties.getProperty("retrain_script");
+
+            if (pythonExe == null || scriptPath == null) {
+                IJ.error(
+                        "Invalid configuration",
+                        "The configuration file must contain 'python' and 'script' paths."
+                );
+                return;
+            }
+
+            IJ.log("Loaded Python executable: " + pythonExe);
+            IJ.log("Loaded inference script: " + scriptPath);
+
+            if (retrainScriptPath != null) {
+                IJ.log("Loaded retraining script: " + retrainScriptPath);
+            } else {
+                IJ.log("Retraining script not configured yet.");
+            }
+
+        } catch (Exception e) {
+            IJ.handleException(e);
         }
     }
 
@@ -372,9 +421,10 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
 
     private void updateButtonState() {
         boolean hasDetections = !detections.isEmpty();
+        boolean busy = detectionRunning || retrainingRunning;
 
         if (importImageButton != null) {
-            importImageButton.setEnabled(!detectionRunning && !correctionMode && !addNeuronMode);
+            importImageButton.setEnabled(!busy && !correctionMode && !addNeuronMode);
         }
 
         detectButton.setEnabled(
@@ -382,41 +432,49 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
                         !hasDetections &&
                         !correctionMode &&
                         !addNeuronMode &&
-                        !detectionRunning
+                        !busy
         );
 
         correctButton.setEnabled(
                 hasDetections &&
                         !correctionMode &&
                         !addNeuronMode &&
-                        !detectionRunning
+                        !busy
         );
 
         deleteSelectedButton.setEnabled(
                 correctionMode &&
                         hasDetections &&
-                        !detectionRunning
+                        !busy
         );
 
         addNeuronButton.setEnabled(
                 correctionMode &&
-                        !detectionRunning
+                        !busy
         );
 
         saveButton.setEnabled(
                 correctionMode &&
                         !addNeuronMode &&
-                        !detectionRunning
+                        !busy
         );
 
         retrainButton.setEnabled(
                 !correctionMode &&
                         hasDetections &&
-                        !detectionRunning
+                        !busy
         );
     }
 
     private void detectNeurons() {
+        if (pythonExe == null || scriptPath == null) {
+
+            IJ.error("Plugin is not configured. Please run the installer first.");
+
+            return;
+
+        }
+
         ImagePlus currentImage = sourceImage;
 
         if (currentImage == null) {
@@ -512,10 +570,25 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
             throw new RuntimeException("Could not save the input image.");
         }
 
+        if (pythonExe == null || scriptPath == null) {
+            throw new RuntimeException("Plugin is not configured. Please run the installer first.");
+        }
+
+        File pythonFile = new File(pythonExe);
+        File scriptFile = new File(scriptPath);
+
+        if (!pythonFile.exists()) {
+            throw new RuntimeException("Python executable not found: " + pythonExe);
+        }
+
+        if (!scriptFile.exists()) {
+            throw new RuntimeException("Inference script not found: " + scriptPath);
+        }
+
         ProcessBuilder pb = new ProcessBuilder(
-                PYTHON_EXE,
+                pythonExe,
                 "-u",
-                SCRIPT_PATH,
+                scriptPath,
                 inputFile.getAbsolutePath(),
                 outputFile.getAbsolutePath()
         );
@@ -717,13 +790,84 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
     }
 
     private void retrainModel() {
-        IJ.showMessage(
-                "Transfer Learning",
-                "This step will retrain the model using corrected detections.\n\n" +
-                        "Current status: pending implementation."
-        );
+        if (pythonExe == null || retrainScriptPath == null) {
+            IJ.error(
+                    "Retraining not configured",
+                    "The retraining script is not configured.\n\n" +
+                            "Please run the installer again or check config.properties."
+            );
+            return;
+        }
 
-        updateStatus("Transfer learning pending implementation.");
+        File pythonFile = new File(pythonExe);
+        File retrainScriptFile = new File(retrainScriptPath);
+
+        if (!pythonFile.exists()) {
+            IJ.error("Python executable not found:\n" + pythonExe);
+            return;
+        }
+
+        if (!retrainScriptFile.exists()) {
+            IJ.error("Retraining script not found:\n" + retrainScriptPath);
+            return;
+        }
+
+        retrainingRunning = true;
+        updateStatus("Retraining model... This may take several minutes. Please wait.");
+        updateButtonState();
+
+        new Thread(() -> {
+            try {
+                ProcessBuilder pb = new ProcessBuilder(
+                        pythonExe,
+                        "-u",
+                        retrainScriptPath
+                );
+
+                pb.redirectErrorStream(true);
+
+                IJ.log("Running model retraining...");
+                IJ.log(String.join(" ", pb.command()));
+
+                Process process = pb.start();
+
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(process.getInputStream()))) {
+
+                    String line;
+
+                    while ((line = reader.readLine()) != null) {
+                        IJ.log(line);
+                    }
+                }
+
+                int exitCode = process.waitFor();
+
+                if (exitCode != 0) {
+                    throw new RuntimeException("Retraining failed with exit code " + exitCode);
+                }
+
+                SwingUtilities.invokeLater(() -> {
+                    retrainingRunning = false;
+                    updateStatus("Retraining completed successfully.");
+                    updateButtonState();
+
+                    IJ.showMessage(
+                            "Retraining completed",
+                            "The model was retrained successfully."
+                    );
+                });
+
+            } catch (Exception e) {
+                IJ.handleException(e);
+
+                SwingUtilities.invokeLater(() -> {
+                    retrainingRunning = false;
+                    updateStatus("Retraining failed.");
+                    updateButtonState();
+                });
+            }
+        }).start();
     }
 
     private void deleteSelectedDetection() {
@@ -1219,10 +1363,6 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
                 g2.setStroke(new BasicStroke(i == selectedIndex ? 2.5f : 1.5f));
                 g2.drawOval(x, y, w, h);
 
-                // int dotSize = i == selectedIndex ? 5 : 4;
-                // int cx = (int) Math.round(offsetX + detection.cx * zoomFactor);
-                // int cy = (int) Math.round(offsetY + detection.cy * zoomFactor);
-                // g2.fillOval(cx - dotSize / 2, cy - dotSize / 2, dotSize, dotSize);
             }
         }
 
@@ -1237,11 +1377,6 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
 
             g2.drawOval(x, y, w, h);
 
-            // int cx = x + w / 2;
-            // int cy = y + h / 2;
-            // int dotSize = 4;
-
-            // g2.fillOval(cx - dotSize / 2, cy - dotSize / 2, dotSize, dotSize);
         }
 
         private int findDetectionAt(double imageX, double imageY) {
