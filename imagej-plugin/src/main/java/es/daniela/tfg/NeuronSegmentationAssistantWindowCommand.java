@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.Properties;
+import java.util.Locale;
 
 @Plugin(type = Command.class, menuPath = "Plugins>TFG>Neuron Segmentation Assistant Window")
 public class NeuronSegmentationAssistantWindowCommand implements Command, ImageListener {
@@ -688,7 +689,25 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
                 double radius = Double.parseDouble(parts[2]);
                 double diameter = radius * 2.0;
 
-                detections.add(new NeuronDetection("AUTO_" + index, cx, cy, diameter, diameter));
+                String maskPolygon = null;
+
+                if (parts.length >= 5) {
+                    maskPolygon = parts[4].replace("\"", "").trim();
+
+                    if (maskPolygon.isEmpty()) {
+                        maskPolygon = null;
+                    }
+                }
+
+                detections.add(new NeuronDetection(
+                        "AUTO_" + index,
+                        cx,
+                        cy,
+                        diameter,
+                        diameter,
+                        maskPolygon,
+                        false
+                ));
                 index++;
             }
         }
@@ -700,6 +719,154 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
                 roiListModel.addElement(detection.name);
             }
         });
+    }
+
+    private File getTransferLearningRootDir() {
+        File root = new File(
+                System.getProperty("user.home"),
+                ".neuron-segmentation-assistant/transfer-learning-data"
+        );
+
+        File imagesTrain = new File(root, "images/train");
+        File labelsTrain = new File(root, "labels/train");
+
+        imagesTrain.mkdirs();
+        labelsTrain.mkdirs();
+
+        return root;
+    }
+
+    private String sanitizeFileName(String name) {
+        return name.replaceAll("[^a-zA-Z0-9._-]", "_");
+    }
+
+    private List<Double> ellipseToYoloPolygon(
+            NeuronDetection detection,
+            int imageWidth,
+            int imageHeight,
+            int points
+    ) {
+        List<Double> coords = new ArrayList<>();
+
+        double rx = detection.width / 2.0;
+        double ry = detection.height / 2.0;
+
+        for (int i = 0; i < points; i++) {
+            double angle = 2.0 * Math.PI * i / points;
+
+            double x = detection.cx + rx * Math.cos(angle);
+            double y = detection.cy + ry * Math.sin(angle);
+
+            x = clamp(x, 0, imageWidth - 1);
+            y = clamp(y, 0, imageHeight - 1);
+
+            coords.add(x / imageWidth);
+            coords.add(y / imageHeight);
+        }
+
+        return coords;
+    }
+
+    private List<Double> maskPolygonToNormalizedYolo(
+            String maskPolygon,
+            int imageWidth,
+            int imageHeight
+    ) {
+        List<Double> coords = new ArrayList<>();
+
+        if (maskPolygon == null || maskPolygon.trim().isEmpty()) {
+            return coords;
+        }
+
+        String[] values = maskPolygon.trim().split("\\s+");
+
+        for (int i = 0; i + 1 < values.length; i += 2) {
+            double x = Double.parseDouble(values[i]);
+            double y = Double.parseDouble(values[i + 1]);
+
+            x = clamp(x, 0, imageWidth - 1);
+            y = clamp(y, 0, imageHeight - 1);
+
+            coords.add(x / imageWidth);
+            coords.add(y / imageHeight);
+        }
+
+        return coords;
+    }
+
+    private List<Double> detectionToYoloPolygon(
+            NeuronDetection detection,
+            int imageWidth,
+            int imageHeight
+    ) {
+        boolean canUseOriginalMask =
+                !detection.edited &&
+                        detection.maskPolygon != null &&
+                        !detection.maskPolygon.trim().isEmpty();
+
+        if (canUseOriginalMask) {
+            try {
+                List<Double> maskCoords = maskPolygonToNormalizedYolo(
+                        detection.maskPolygon,
+                        imageWidth,
+                        imageHeight
+                );
+
+                // YOLO segmentation needs at least 3 points = 6 values.
+                if (maskCoords.size() >= 6) {
+                    return maskCoords;
+                }
+
+            } catch (Exception e) {
+                IJ.log("Could not use original mask polygon for " + detection.name + ". Falling back to ellipse.");
+            }
+        }
+
+        return ellipseToYoloPolygon(
+                detection,
+                imageWidth,
+                imageHeight,
+                32
+        );
+    }
+
+    private void writeYoloLabelFile(File labelFile, int imageWidth, int imageHeight) throws IOException {
+        try (PrintWriter writer = new PrintWriter(new FileWriter(labelFile))) {
+            for (NeuronDetection detection : detections) {
+                List<Double> polygon = detectionToYoloPolygon(
+                        detection,
+                        imageWidth,
+                        imageHeight
+                );
+
+                if (polygon.size() < 6) {
+                    IJ.log("Skipping invalid polygon for detection: " + detection.name);
+                    continue;
+                }
+
+                StringBuilder line = new StringBuilder();
+                line.append("0");
+
+                for (Double value : polygon) {
+                    line.append(" ");
+                    line.append(String.format(Locale.US, "%.6f", value));
+                }
+
+                writer.println(line);
+            }
+        }
+    }
+
+    private void writeDataYaml(File rootDir) throws IOException {
+        File yamlFile = new File(rootDir, "data.yaml");
+
+        try (PrintWriter writer = new PrintWriter(new FileWriter(yamlFile))) {
+            writer.println("path: " + rootDir.getAbsolutePath().replace("\\", "/"));
+            writer.println("train: images/train");
+            writer.println("val: images/train");
+            writer.println("names:");
+            writer.println("  0: neuron");
+        }
     }
 
     private void updateDisplayedImage(boolean flattenOverlay) {
@@ -768,25 +935,75 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
     }
 
     private void saveCorrections() {
-        correctionMode = false;
-        addNeuronMode = false;
-        selectedDetectionIndex = -1;
-
-        addNeuronButton.setText("2.2 Add neurons");
-        roiList.clearSelection();
-
-        updateStatus("Corrections saved. You can correct again or retrain the model.");
-        updateButtonState();
-
-        if (imagePanel != null) {
-            imagePanel.repaint();
+        if (sourceImage == null) {
+            IJ.error("No source image available.");
+            return;
         }
 
-        IJ.showMessage(
-                "Save corrections",
-                "Corrections saved for transfer learning.\n\n" +
-                        "Current status: saving pipeline pending implementation."
-        );
+        if (detections.isEmpty()) {
+            IJ.error("There are no detections to save.");
+            return;
+        }
+
+        try {
+            File rootDir = getTransferLearningRootDir();
+
+            File imagesTrainDir = new File(rootDir, "images/train");
+            File labelsTrainDir = new File(rootDir, "labels/train");
+
+            String baseName = sanitizeFileName(
+                    sourceImage.getTitle().replaceFirst("[.][^.]+$", "")
+            );
+
+            String uniqueName = baseName + "_" + sessionId.substring(0, 8);
+
+            File imageFile = new File(imagesTrainDir, uniqueName + ".png");
+            File labelFile = new File(labelsTrainDir, uniqueName + ".txt");
+
+            boolean savedImage = new FileSaver(sourceImage).saveAsPng(imageFile.getAbsolutePath());
+
+            if (!savedImage) {
+                throw new RuntimeException("Could not save corrected training image.");
+            }
+
+            writeYoloLabelFile(
+                    labelFile,
+                    sourceImage.getWidth(),
+                    sourceImage.getHeight()
+            );
+
+            writeDataYaml(rootDir);
+
+            correctionMode = false;
+            addNeuronMode = false;
+            selectedDetectionIndex = -1;
+
+            addNeuronButton.setText("2.2 Add neurons");
+            roiList.clearSelection();
+
+            updateStatus("Corrections saved for transfer learning.");
+            updateButtonState();
+
+            if (imagePanel != null) {
+                imagePanel.repaint();
+            }
+
+            IJ.log("Transfer learning image saved to: " + imageFile.getAbsolutePath());
+            IJ.log("Transfer learning label saved to: " + labelFile.getAbsolutePath());
+            IJ.log("Transfer learning data.yaml saved to: " + new File(rootDir, "data.yaml").getAbsolutePath());
+
+            IJ.showMessage(
+                    "Save corrections",
+                    "Corrections saved for transfer learning.\n\n" +
+                            "Image:\n" + imageFile.getAbsolutePath() + "\n\n" +
+                            "Label:\n" + labelFile.getAbsolutePath()
+            );
+
+        } catch (Exception e) {
+            IJ.handleException(e);
+            updateStatus("Could not save corrections.");
+            updateButtonState();
+        }
     }
 
     private void retrainModel() {
@@ -818,10 +1035,20 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
 
         new Thread(() -> {
             try {
+                File rootDir = getTransferLearningRootDir();
+                File dataYaml = new File(rootDir, "data.yaml");
+
+                if (!dataYaml.exists()) {
+                    throw new RuntimeException(
+                            "Transfer learning data.yaml not found. Please save corrections before retraining."
+                    );
+                }
+
                 ProcessBuilder pb = new ProcessBuilder(
                         pythonExe,
                         "-u",
-                        retrainScriptPath
+                        retrainScriptPath,
+                        dataYaml.getAbsolutePath()
                 );
 
                 pb.redirectErrorStream(true);
@@ -854,7 +1081,8 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
 
                     IJ.showMessage(
                             "Retraining completed",
-                            "The model was retrained successfully."
+                            "The model was retrained successfully.\n\n" +
+                                    "The adapted model has been generated and will be used in future detections."
                     );
                 });
 
@@ -1041,12 +1269,34 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         private double width;
         private double height;
 
+        // Original YOLO mask polygon, exported by infer_one.py.
+        // Stored in absolute image coordinates: x1 y1 x2 y2 ...
+        private String maskPolygon;
+
+        // True when the user moves, edits or creates the detection manually.
+        // If true, the detection is exported as an ellipse polygon.
+        private boolean edited;
+
         private NeuronDetection(String name, double cx, double cy, double width, double height) {
+            this(name, cx, cy, width, height, null, false);
+        }
+
+        private NeuronDetection(
+                String name,
+                double cx,
+                double cy,
+                double width,
+                double height,
+                String maskPolygon,
+                boolean edited
+        ) {
             this.name = name;
             this.cx = cx;
             this.cy = cy;
             this.width = width;
             this.height = height;
+            this.maskPolygon = maskPolygon;
+            this.edited = edited;
         }
     }
 
@@ -1068,7 +1318,9 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
                 cx,
                 cy,
                 width,
-                height
+                height,
+                null,
+                true
         ));
 
         selectedDetectionIndex = detections.size() - 1;
@@ -1116,6 +1368,10 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
 
                     double imageX = screenToImageX(e.getX());
                     double imageY = screenToImageY(e.getY());
+
+                    if (!correctionMode && !addNeuronMode) {
+                        return;
+                    }
 
                     if (addNeuronMode) {
                         int clickedIndex = findDetectionAt(imageX, imageY);
@@ -1205,6 +1461,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
 
                         selected.cx = clamp(selected.cx + dx, 0, imageToDisplay.getWidth() - 1);
                         selected.cy = clamp(selected.cy + dy, 0, imageToDisplay.getHeight() - 1);
+                        selected.edited = true;
 
                         lastMoveImageX = imageX;
                         lastMoveImageY = imageY;
