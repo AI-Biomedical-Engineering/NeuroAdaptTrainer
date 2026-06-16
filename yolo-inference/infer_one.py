@@ -28,7 +28,11 @@ import traceback
 ROOT = Path(__file__).resolve().parent
 
 # Absolute model path to avoid relying on "cwd" when called from Fiji.
-MODEL_PATH = ROOT / "models" / "best.pt"
+BASE_MODEL_PATH = ROOT / "models" / "best.pt"
+ADAPTED_MODEL_PATH = ROOT / "models" / "best_adapted.pt"
+
+# If an adapted model exists, use it. Otherwise, fall back to the original model.
+MODEL_PATH = ADAPTED_MODEL_PATH if ADAPTED_MODEL_PATH.exists() else BASE_MODEL_PATH
 
 # -----------------------------------------------------------------------------
 # Inference / Visualization configuration
@@ -50,6 +54,10 @@ CONTRAST_BETA = 4
 MIN_AREA = 25
 NMS_IOU = 0.35
 
+# Polygon export
+ELLIPSE_POLYGON_POINTS = 32
+MASK_POLYGON_EPSILON_RATIO = 0.002
+
 # Visualization style
 DRAW_STYLE = "circle"
 DRAW_CENTER = True
@@ -69,21 +77,41 @@ def safe_imwrite(path: Path, img: np.ndarray) -> None:
 
 def save_detections_csv(path: Path, items):
     """
-    Save detected neurons as CSV with center coordinates and radius.
-    Format:
-        cx,cy,radius
+    Save detected neurons as CSV.
+
+    Columns:
+        cx,cy,radius,ellipse_polygon,mask_polygon
+
+    The first three columns are kept for compatibility with the Java plugin.
+    ellipse_polygon stores a 32-point circular approximation.
+    mask_polygon stores the simplified contour extracted from the original YOLO mask.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, "w") as f:
-        f.write("cx,cy,radius\n")
+        f.write("cx,cy,radius,ellipse_polygon,mask_polygon\n")
 
-        for (box, (cx, cy), area) in items:
-
+        for (box, (cx, cy), area, mask) in items:
             rad = int(round(np.sqrt(max(area, 1) / np.pi)))
             rad = max(RADIUS_MIN, min(RADIUS_MAX, rad))
 
-            f.write(f"{cx},{cy},{rad}\n")
+            ellipse_polygon = ellipse_polygon_from_detection(
+                cx=cx,
+                cy=cy,
+                radius=rad,
+                points=ELLIPSE_POLYGON_POINTS
+            )
+
+            mask_polygon = mask_polygon_from_binary_mask(mask)
+
+            ellipse_polygon_str = serialize_polygon(ellipse_polygon)
+            mask_polygon_str = serialize_polygon(mask_polygon)
+
+            f.write(
+                f"{cx},{cy},{rad},"
+                f"\"{ellipse_polygon_str}\","
+                f"\"{mask_polygon_str}\"\n"
+            )
 
 def filter_masks_by_area(mask_tensor: np.ndarray, min_area: int) -> np.ndarray:
     """
@@ -101,26 +129,40 @@ def filter_masks_by_area(mask_tensor: np.ndarray, min_area: int) -> np.ndarray:
         return np.zeros((0, mask_tensor.shape[1], mask_tensor.shape[2]), dtype=mask_tensor.dtype)
     return np.stack(kept, axis=0)
 
-
-def masks_to_boxes_and_centroids(mask_tensor: np.ndarray):
+def masks_to_boxes_centroids_and_masks(mask_tensor: np.ndarray, target_width: int, target_height: int):
     """
-    Convert masks to (bounding box, centroid, area) tuples for each instance.
-    Bounding box format: (x1, y1, x2, y2).
+    Convert masks to (bounding box, centroid, area, binary_mask) tuples for each instance.
+
+    The masks are resized to the original image size before extracting coordinates.
+    This ensures that exported polygons are aligned with the image saved by the Java plugin.
     """
     items = []
+
     for i in range(mask_tensor.shape[0]):
         m = (mask_tensor[i] > 0.5).astype(np.uint8)
+
+        if m.shape[1] != target_width or m.shape[0] != target_height:
+            m = cv2.resize(
+                m,
+                (target_width, target_height),
+                interpolation=cv2.INTER_NEAREST
+            )
+
         ys, xs = np.where(m > 0)
+
         if xs.size == 0 or ys.size == 0:
             continue
+
         x1, x2 = int(xs.min()), int(xs.max())
         y1, y2 = int(ys.min()), int(ys.max())
+
         area = int(xs.size)
         cx = float(xs.mean())
         cy = float(ys.mean())
-        items.append(((x1, y1, x2, y2), (cx, cy), area))
-    return items
 
+        items.append(((x1, y1, x2, y2), (cx, cy), area, m))
+
+    return items
 
 def iou_xyxy(a, b) -> float:
     """
@@ -168,6 +210,74 @@ def clamp_xyxy(box, w, h):
     y2 = max(0, min(h - 1, y2))
     return x1, y1, x2, y2
 
+
+def ellipse_polygon_from_detection(cx: float, cy: float, radius: int, points: int = ELLIPSE_POLYGON_POINTS):
+    """
+    Generate a polygonal approximation of a circle centered at (cx, cy).
+    The result is a list of absolute image coordinates:
+        [x1, y1, x2, y2, ..., xn, yn]
+    """
+    coords = []
+
+    for i in range(points):
+        angle = 2.0 * np.pi * i / points
+
+        x = cx + radius * np.cos(angle)
+        y = cy + radius * np.sin(angle)
+
+        coords.extend([float(x), float(y)])
+
+    return coords
+
+
+def mask_polygon_from_binary_mask(mask: np.ndarray, epsilon_ratio: float = MASK_POLYGON_EPSILON_RATIO):
+    """
+    Extract the largest contour from a binary mask and approximate it as a polygon.
+    The result is a list of absolute image coordinates:
+        [x1, y1, x2, y2, ..., xn, yn]
+    """
+    mask_uint8 = (mask > 0).astype(np.uint8) * 255
+
+    contours, _ = cv2.findContours(
+        mask_uint8,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    if not contours:
+        return []
+
+    largest_contour = max(contours, key=cv2.contourArea)
+
+    perimeter = cv2.arcLength(largest_contour, True)
+
+    if perimeter <= 0:
+        return []
+
+    epsilon = epsilon_ratio * perimeter
+
+    approximated = cv2.approxPolyDP(
+        largest_contour,
+        epsilon,
+        True
+    )
+
+    coords = []
+
+    for point in approximated:
+        x, y = point[0]
+        coords.extend([float(x), float(y)])
+
+    return coords
+
+
+def serialize_polygon(coords):
+    """
+    Serialize a polygon coordinate list into a compact string.
+    Example:
+        [10.2, 15.4, 20.0, 30.0] -> "10.20 15.40 20.00 30.00"
+    """
+    return " ".join(f"{value:.2f}" for value in coords)
 
 def main():
     """
@@ -237,7 +347,8 @@ def main():
             mask_np = r.masks.data.detach().cpu().numpy()
             mask_np = filter_masks_by_area(mask_np, MIN_AREA)
 
-            items = masks_to_boxes_and_centroids(mask_np)
+            image_height, image_width = image_bgr.shape[:2]
+            items = masks_to_boxes_centroids_and_masks(mask_np, image_width, image_height)
             items = nms_on_items(items, NMS_IOU)
 
             print(f"Detected neurons (filtered + NMS): {len(items)}", flush=True)
