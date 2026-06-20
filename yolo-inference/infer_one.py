@@ -27,12 +27,23 @@ import traceback
 # ROOT is the folder where this script lives, independent of the current working directory.
 ROOT = Path(__file__).resolve().parent
 
-# Absolute model path to avoid relying on "cwd" when called from Fiji.
 BASE_MODEL_PATH = ROOT / "models" / "best.pt"
-ADAPTED_MODEL_PATH = ROOT / "models" / "best_adapted.pt"
 
-# If an adapted model exists, use it. Otherwise, fall back to the original model.
-MODEL_PATH = ADAPTED_MODEL_PATH if ADAPTED_MODEL_PATH.exists() else BASE_MODEL_PATH
+
+def resolve_model_path():
+    """
+    Resolve the model path used for inference.
+
+    Usage:
+        python infer_one.py <image_path> [output_path] [model_path]
+
+    If model_path is provided, it is used.
+    Otherwise, the base model is used.
+    """
+    if len(sys.argv) >= 4:
+        return Path(sys.argv[3]).expanduser().resolve()
+
+    return BASE_MODEL_PATH
 
 # -----------------------------------------------------------------------------
 # Inference / Visualization configuration
@@ -298,9 +309,11 @@ def main():
         if not image_path.exists():
             print(f"Input image not found: {image_path}", file=sys.stderr, flush=True)
             sys.exit(2)
+            
+        model_path = resolve_model_path()
 
-        if not MODEL_PATH.exists():
-            print(f"Model not found: {MODEL_PATH}", file=sys.stderr, flush=True)
+        if not model_path.exists():
+            print(f"Model not found: {model_path}", file=sys.stderr, flush=True)
             sys.exit(2)
 
         # Optional output path provided by Fiji (typically a /tmp file)
@@ -314,11 +327,11 @@ def main():
         stable_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"ROOT: {ROOT}", flush=True)
-        print(f"MODEL: {MODEL_PATH}", flush=True)
+        print(f"MODEL: {model_path}", flush=True)
         print(f"INPUT: {image_path}", flush=True)
         print(f"ULTRA_DIR: {stable_dir}", flush=True)
 
-        model = YOLO(str(MODEL_PATH))
+        model = YOLO(str(model_path))
 
         # Run YOLO inference (do not save Ultralytics default images; we draw our own output)
         results = model.predict(

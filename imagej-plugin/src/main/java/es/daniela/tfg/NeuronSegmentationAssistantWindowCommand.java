@@ -24,7 +24,7 @@ import java.util.Set;
 import java.util.Properties;
 import java.util.Locale;
 
-@Plugin(type = Command.class, menuPath = "Plugins>TFG>Neuron Segmentation Assistant Window")
+@Plugin(type = Command.class, menuPath = "Plugins>Neuron Analysis>Segmentation Assistant")
 public class NeuronSegmentationAssistantWindowCommand implements Command, ImageListener {
 
     private String pythonExe;
@@ -331,7 +331,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         deleteSelectedButton = new JButton("2.1 Delete neuron");
         addNeuronButton = new JButton("2.2 Add neurons");
         saveButton = new JButton("2.3 Save corrections");
-        retrainButton = new JButton("3. Retrain model");
+        retrainButton = new JButton("3. Transfer learning");
 
         correctButton.setEnabled(false);
         saveButton.setEnabled(false);
@@ -342,7 +342,9 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         detectButton.addActionListener(e -> detectNeurons());
         correctButton.addActionListener(e -> enableCorrectionMode());
         saveButton.addActionListener(e -> saveCorrections());
-        retrainButton.addActionListener(e -> retrainModel());
+        retrainButton.addActionListener(e -> {
+            new NeuronTransferLearningWindowCommand().run();
+        });
         deleteSelectedButton.addActionListener(e -> deleteSelectedDetection());
 
         addNeuronButton.addActionListener(e -> {
