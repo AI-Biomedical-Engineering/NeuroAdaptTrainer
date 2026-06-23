@@ -24,7 +24,7 @@ import java.util.Set;
 import java.util.Properties;
 import java.util.Locale;
 
-@Plugin(type = Command.class, menuPath = "Plugins>Neuron Analysis>Segmentation Assistant")
+@Plugin(type = Command.class, menuPath = "Plugins>Neuron Segmentation>Single Image Segmentation")
 public class NeuronSegmentationAssistantWindowCommand implements Command, ImageListener {
 
     private String pythonExe;
@@ -96,7 +96,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
 
         sourceImage = getCurrentOrFirstImage();
 
-        frame = new JFrame("Neuron Segmentation Assistant");
+        frame = new JFrame("Single Image Neuron Segmentation");
         frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
         frame.setSize(1050, 720);
         frame.setLayout(new BorderLayout(8, 8));

@@ -68,7 +68,9 @@ Write-Host "Configuration saved to:"
 Write-Host $ConfigFile
 Write-Host ""
 Write-Host "You can now open Fiji and run:"
-Write-Host "Plugins > TFG > Neuron Segmentation Assistant Window"
+Write-Host "Plugins > Neuron Segmentation > Single Image Segmentation"
+Write-Host "or:"
+Write-Host "Plugins > Neuron Segmentation > Transfer Learning Assistant"
 Write-Host ""
 
 pause

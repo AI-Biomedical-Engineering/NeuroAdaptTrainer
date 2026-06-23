@@ -10,6 +10,7 @@ import org.scijava.plugin.Plugin;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.image.BufferedImage;
+import java.awt.Polygon;
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
@@ -19,7 +20,7 @@ import java.util.Properties;
 import java.util.Locale;
 import java.util.UUID;
 
-@Plugin(type = Command.class, menuPath = "Plugins>Neuron Analysis>Transfer Learning Assistant")
+@Plugin(type = Command.class, menuPath = "Plugins>Neuron Segmentation>Transfer Learning Assistant")
 public class NeuronTransferLearningWindowCommand implements Command {
 
     private String pythonExe;
@@ -38,6 +39,8 @@ public class NeuronTransferLearningWindowCommand implements Command {
     private JLabel folderLabel;
     private JLabel modelLabel;
     private JLabel zoomLabel;
+
+    private JTextArea logTextArea;
 
     private JScrollPane imageScrollPane;
     private ImagePanel imagePanel;
@@ -68,7 +71,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
     private ImagePlus imageToDisplay;
 
     private final List<NeuronDetection> detections = new ArrayList<>();
-    private int selectedDetectionIndex = -1;
+    private final List<Integer> selectedDetectionIndices = new ArrayList<>();
 
     private boolean correctionMode = false;
     private boolean addNeuronMode = false;
@@ -80,6 +83,14 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
     private final String sessionId = UUID.randomUUID().toString();
     private File sessionDir;
+
+    private static final Color COLOR_AUTOMATIC = new Color(0, 170, 255);      // automatic YOLO detections
+    private static final Color COLOR_MANUAL = new Color(255, 190, 0);         // user-added neurons
+    private static final Color COLOR_ANNOTATION = new Color(190, 90, 255);    // saved corrected annotations
+    private static final Color COLOR_SELECTED = new Color(255, 80, 80);       // selected ROI
+    private static final Color COLOR_LASSO = new Color(255, 140, 0);          // lasso selection
+    private static final Color COLOR_TEMPORARY = new Color(0, 220, 160);      // ROI being drawn
+    private static final Color COLOR_OUTLINE_SHADOW = new Color(0, 0, 0, 100);
 
     @Override
     public void run() {
@@ -98,15 +109,42 @@ public class NeuronTransferLearningWindowCommand implements Command {
             sessionDir.mkdirs();
         }
 
-        frame = new JFrame("Neuron Transfer Learning");
+        frame = new JFrame("Neuron Transfer Learning Assistant");
         frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
-        frame.setSize(1200, 760);
+        frame.setSize(1250, 850);
         frame.setLayout(new BorderLayout(8, 8));
 
-        frame.add(createLeftPanel(), BorderLayout.WEST);
-        frame.add(createCenterPanel(), BorderLayout.CENTER);
-        frame.add(createRightPanel(), BorderLayout.EAST);
-        frame.add(createBottomPanel(), BorderLayout.SOUTH);
+        JSplitPane leftCenterSplit = new JSplitPane(
+                JSplitPane.HORIZONTAL_SPLIT,
+                createLeftPanel(),
+                createCenterPanel()
+        );
+
+        leftCenterSplit.setResizeWeight(0.25);
+        leftCenterSplit.setDividerLocation(340);
+        leftCenterSplit.setOneTouchExpandable(true);
+
+        JSplitPane mainSplit = new JSplitPane(
+                JSplitPane.HORIZONTAL_SPLIT,
+                leftCenterSplit,
+                createRightPanel()
+        );
+
+        mainSplit.setResizeWeight(0.82);
+        mainSplit.setDividerLocation(970);
+        mainSplit.setOneTouchExpandable(true);
+
+        JSplitPane verticalSplit = new JSplitPane(
+                JSplitPane.VERTICAL_SPLIT,
+                mainSplit,
+                createBottomPanel()
+        );
+
+        verticalSplit.setResizeWeight(0.85);
+        verticalSplit.setDividerLocation(650);
+        verticalSplit.setOneTouchExpandable(true);
+
+        frame.add(verticalSplit, BorderLayout.CENTER);
 
         frame.addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
@@ -126,7 +164,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
     private JPanel createLeftPanel() {
         JPanel panel = new JPanel(new BorderLayout(4, 4));
-        panel.setPreferredSize(new Dimension(260, 0));
+        panel.setPreferredSize(new Dimension(340, 0));
         panel.setBorder(BorderFactory.createTitledBorder("Image folder"));
 
         folderLabel = new JLabel("No folder selected");
@@ -259,19 +297,23 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
         roiListModel = new DefaultListModel<>();
         roiList = new JList<>(roiListModel);
-        roiList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        roiList.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
 
         roiList.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting()) {
-                int index = roiList.getSelectedIndex();
+                selectedDetectionIndices.clear();
 
-                if (index >= 0 && index < detections.size()) {
-                    selectedDetectionIndex = index;
+                for (int index : roiList.getSelectedIndices()) {
+                    if (index >= 0 && index < detections.size()) {
+                        selectedDetectionIndices.add(index);
+                    }
                 }
 
                 if (imagePanel != null) {
                     imagePanel.repaint();
                 }
+
+                updateButtonState();
             }
         });
 
@@ -291,10 +333,23 @@ public class NeuronTransferLearningWindowCommand implements Command {
     }
 
     private JPanel createBottomPanel() {
-        JPanel panel = new JPanel(new BorderLayout());
+        JPanel panel = new JPanel(new BorderLayout(4, 4));
+        panel.setBorder(BorderFactory.createEmptyBorder(4, 6, 4, 6));
+
         statusLabel = new JLabel("Ready.");
-        statusLabel.setBorder(BorderFactory.createEmptyBorder(6, 12, 6, 12));
-        panel.add(statusLabel, BorderLayout.WEST);
+        statusLabel.setBorder(BorderFactory.createEmptyBorder(4, 6, 4, 6));
+
+        logTextArea = new JTextArea(4, 80);
+        logTextArea.setEditable(false);
+        logTextArea.setLineWrap(false);
+        logTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
+
+        JScrollPane logScrollPane = new JScrollPane(logTextArea);
+        logScrollPane.setBorder(BorderFactory.createTitledBorder("Log"));
+
+        panel.add(statusLabel, BorderLayout.NORTH);
+        panel.add(logScrollPane, BorderLayout.CENTER);
+
         return panel;
     }
 
@@ -325,10 +380,10 @@ public class NeuronTransferLearningWindowCommand implements Command {
             scriptPath = properties.getProperty("script");
             retrainScriptPath = properties.getProperty("retrain_script");
 
-            IJ.log("Loaded config file: " + configFile.getAbsolutePath());
-            IJ.log("Loaded Python executable: " + pythonExe);
-            IJ.log("Loaded inference script: " + scriptPath);
-            IJ.log("Loaded retraining script: " + retrainScriptPath);
+            appendLog("Loaded config file: " + configFile.getAbsolutePath());
+            appendLog("Loaded Python executable: " + pythonExe);
+            appendLog("Loaded inference script: " + scriptPath);
+            appendLog("Loaded retraining script: " + retrainScriptPath);
 
             if (pythonExe == null || pythonExe.trim().isEmpty()) {
                 IJ.error("Configuration error", "Missing property: python");
@@ -345,6 +400,59 @@ public class NeuronTransferLearningWindowCommand implements Command {
         } catch (Exception e) {
             IJ.handleException(e);
         }
+    }
+
+    private boolean isDetectionSelected(int index) {
+        return selectedDetectionIndices.contains(index);
+    }
+
+    private void clearDetectionSelection() {
+        selectedDetectionIndices.clear();
+
+        if (roiList != null) {
+            roiList.clearSelection();
+        }
+
+        if (imagePanel != null) {
+            imagePanel.repaint();
+        }
+    }
+
+    private void setSingleDetectionSelection(int index) {
+        selectedDetectionIndices.clear();
+
+        if (index >= 0 && index < detections.size()) {
+            selectedDetectionIndices.add(index);
+            roiList.setSelectedIndex(index);
+            roiList.ensureIndexIsVisible(index);
+        } else {
+            roiList.clearSelection();
+        }
+
+        if (imagePanel != null) {
+            imagePanel.repaint();
+        }
+    }
+
+    private void toggleDetectionSelection(int index) {
+        if (index < 0 || index >= detections.size()) {
+            return;
+        }
+
+        if (selectedDetectionIndices.contains(index)) {
+            selectedDetectionIndices.remove(Integer.valueOf(index));
+            roiList.removeSelectionInterval(index, index);
+        } else {
+            selectedDetectionIndices.add(index);
+            roiList.addSelectionInterval(index, index);
+            roiList.ensureIndexIsVisible(index);
+        }
+
+        if (imagePanel != null) {
+            imagePanel.repaint();
+        }
+
+        updateButtonState();
     }
 
     private void selectFolder() {
@@ -452,7 +560,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
             detections.clear();
             roiListModel.clear();
-            selectedDetectionIndex = -1;
+            selectedDetectionIndices.clear();
             correctionMode = false;
             addNeuronMode = false;
 
@@ -597,10 +705,10 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
         pb.redirectErrorStream(true);
 
-        IJ.log("Running batch inference using temporary PNG created by ImageJ:");
-        IJ.log("Original image: " + imageFile.getAbsolutePath());
-        IJ.log("Temporary input: " + tempInputPng.getAbsolutePath());
-        IJ.log(String.join(" ", pb.command()));
+        appendLog("Running batch inference using temporary PNG created by ImageJ:");
+        appendLog("Original image: " + imageFile.getAbsolutePath());
+        appendLog("Temporary input: " + tempInputPng.getAbsolutePath());
+        appendLog(String.join(" ", pb.command()));
 
         Process process = pb.start();
 
@@ -610,7 +718,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             String line;
 
             while ((line = reader.readLine()) != null) {
-                IJ.log(line);
+                appendLog(line);
             }
         }
 
@@ -649,7 +757,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
         correctionMode = true;
         addNeuronMode = false;
-        selectedDetectionIndex = -1;
+        selectedDetectionIndices.clear();
         roiList.clearSelection();
 
         addNeuronButton.setText("3.2 Add neurons");
@@ -693,7 +801,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
             correctionMode = false;
             addNeuronMode = false;
-            selectedDetectionIndex = -1;
+            selectedDetectionIndices.clear();
             roiList.clearSelection();
 
             refreshImageStatus(currentImageFile, "annotated");
@@ -702,8 +810,8 @@ public class NeuronTransferLearningWindowCommand implements Command {
             updateButtonState();
             imagePanel.repaint();
 
-            IJ.log("Versioned annotation saved to: " + versionedAnnotation.getAbsolutePath());
-            IJ.log("Training dataset will be rebuilt automatically before retraining.");
+            appendLog("Versioned annotation saved to: " + versionedAnnotation.getAbsolutePath());
+            appendLog("Training dataset will be rebuilt automatically before retraining.");
 
         } catch (Exception e) {
             IJ.handleException(e);
@@ -780,8 +888,8 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
                 pb.redirectErrorStream(true);
 
-                IJ.log("Running transfer learning:");
-                IJ.log(String.join(" ", pb.command()));
+                appendLog("Running transfer learning:");
+                appendLog(String.join(" ", pb.command()));
 
                 Process process = pb.start();
 
@@ -791,7 +899,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                     String line;
 
                     while ((line = reader.readLine()) != null) {
-                        IJ.log(line);
+                        appendLog(line);
                     }
                 }
 
@@ -879,7 +987,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 createTrainingImageForYolo(imageFile, yoloImage);
                 Files.copy(latestAnnotation.toPath(), yoloLabel.toPath(), StandardCopyOption.REPLACE_EXISTING);
 
-                IJ.log("Training sample from corrected annotation: " + imageFile.getName());
+                appendLog("Training sample from corrected annotation: " + imageFile.getName());
                 count++;
                 continue;
             }
@@ -888,7 +996,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 ImagePlus imp = IJ.openImage(imageFile.getAbsolutePath());
 
                 if (imp == null) {
-                    IJ.log("Skipping image because ImageJ could not open it: " + imageFile.getAbsolutePath());
+                    appendLog("Skipping image because ImageJ could not open it: " + imageFile.getAbsolutePath());
                     continue;
                 }
 
@@ -896,7 +1004,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                     List<NeuronDetection> automaticDetections = readDetectionsFromCsv(detectionFile);
 
                     if (automaticDetections.isEmpty()) {
-                        IJ.log("Skipping image without detections: " + imageFile.getName());
+                        appendLog("Skipping image without detections: " + imageFile.getName());
                         continue;
                     }
 
@@ -909,7 +1017,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                             automaticDetections
                     );
 
-                    IJ.log("Training sample from automatic detection: " + imageFile.getName());
+                    appendLog("Training sample from automatic detection: " + imageFile.getName());
                     count++;
 
                 } finally {
@@ -920,7 +1028,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
         writeDataYaml(yoloDatasetDir);
 
-        IJ.log("Prepared training set with " + count + " images.");
+        appendLog("Prepared training set with " + count + " images.");
         return count;
     }
 
@@ -939,7 +1047,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 String[] parts = line.split(",");
 
                 if (parts.length < 3) {
-                    IJ.log("Skipping malformed CSV line: " + line);
+                    appendLog("Skipping malformed CSV line: " + line);
                     continue;
                 }
 
@@ -993,7 +1101,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 throw new IOException("Could not save training PNG: " + targetImageFile.getAbsolutePath());
             }
 
-            IJ.log("Created normalized training PNG: " + targetImageFile.getAbsolutePath());
+            appendLog("Created normalized training PNG: " + targetImageFile.getAbsolutePath());
 
         } finally {
             imp.close();
@@ -1016,7 +1124,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 clearDirectory(file);
 
                 if (!file.delete()) {
-                    IJ.log("Warning: could not delete directory: " + file.getAbsolutePath());
+                    appendLog("Warning: could not delete directory: " + file.getAbsolutePath());
                 }
             } else {
                 Files.deleteIfExists(file.toPath());
@@ -1085,7 +1193,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 }
 
             } catch (Exception e) {
-                IJ.log("Could not read global active model. Falling back to base model.");
+                appendLog("Could not read global active model. Falling back to base model.");
             }
         }
 
@@ -1146,7 +1254,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             }
 
         } catch (Exception e) {
-            IJ.log("Could not read folder active model.");
+            appendLog("Could not read folder active model.");
         }
 
         return null;
@@ -1292,13 +1400,26 @@ public class NeuronTransferLearningWindowCommand implements Command {
     private void updateStatus(String message) {
         int count = detections.size();
 
+        String fullMessage;
+
         if (count > 0) {
-            statusLabel.setText("Neurons: " + count + " | " + message);
+            fullMessage = "Neurons: " + count + " | " + message;
         } else {
-            statusLabel.setText(message);
+            fullMessage = message;
         }
 
-        IJ.log("[Transfer Learning] " + message);
+        if (statusLabel != null) {
+            statusLabel.setText(fullMessage);
+        }
+
+        appendLog("[Transfer Learning] " + message);
+    }
+
+    private void appendLog(String message) {
+        if (logTextArea != null) {
+            logTextArea.append(message + "\n");
+            logTextArea.setCaretPosition(logTextArea.getDocument().getLength());
+        }
     }
 
     private void updateButtonState() {
@@ -1310,7 +1431,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
         selectFolderButton.setEnabled(!busy);
         detectImagesButton.setEnabled(hasFolder && !busy);
         correctButton.setEnabled(hasImage && hasDetections && !correctionMode && !busy);
-        deleteSelectedButton.setEnabled(correctionMode && hasDetections && !busy);
+        deleteSelectedButton.setEnabled(correctionMode && !selectedDetectionIndices.isEmpty() && !busy);
         addNeuronButton.setEnabled(correctionMode && !busy);
         saveToTrainingSetButton.setEnabled(hasImage && hasDetections && !addNeuronMode && !busy);
         retrainButton.setEnabled(hasFolder && !busy);
@@ -1449,7 +1570,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             roiListModel.addElement(detection.name);
         }
 
-        selectedDetectionIndex = -1;
+        selectedDetectionIndices.clear();
         roiList.clearSelection();
 
         if (imagePanel != null) {
@@ -1534,7 +1655,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 }
 
             } catch (Exception e) {
-                IJ.log("Could not use original mask polygon for " + detection.name + ". Falling back to ellipse.");
+                appendLog("Could not use original mask polygon for " + detection.name + ". Falling back to ellipse.");
             }
         }
 
@@ -1563,7 +1684,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 );
 
                 if (polygon.size() < 6) {
-                    IJ.log("Skipping invalid polygon for detection: " + detection.name);
+                    appendLog("Skipping invalid polygon for detection: " + detection.name);
                     continue;
                 }
 
@@ -1592,7 +1713,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 );
 
                 if (polygon.size() < 6) {
-                    IJ.log("Skipping invalid polygon for detection: " + detection.name);
+                    appendLog("Skipping invalid polygon for detection: " + detection.name);
                     continue;
                 }
 
@@ -1622,24 +1743,29 @@ public class NeuronTransferLearningWindowCommand implements Command {
     }
 
     private void deleteSelectedDetection() {
-        int selectedIndex = selectedDetectionIndex;
-
-        if (selectedIndex < 0 || selectedIndex >= detections.size()) {
-            selectedIndex = roiList.getSelectedIndex();
-        }
-
-        if (selectedIndex < 0 || selectedIndex >= detections.size()) {
+        if (selectedDetectionIndices.isEmpty()) {
             IJ.showMessage(
                     "Delete neuron",
-                    "Please select a neuron first."
+                    "Please select one or more neurons first."
             );
             return;
         }
 
-        detections.remove(selectedIndex);
-        selectedDetectionIndex = -1;
+        selectedDetectionIndices.sort((a, b) -> Integer.compare(b, a));
+
+        int deletedCount = 0;
+
+        for (int index : selectedDetectionIndices) {
+            if (index >= 0 && index < detections.size()) {
+                detections.remove(index);
+                deletedCount++;
+            }
+        }
+
+        selectedDetectionIndices.clear();
         refreshAfterEditing();
-        updateStatus("Deleted selected neuron.");
+
+        updateStatus("Deleted " + deletedCount + " selected neuron(s).");
     }
 
     private void refreshAfterEditing() {
@@ -1649,6 +1775,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             roiListModel.addElement(detection.name);
         }
 
+        selectedDetectionIndices.clear();
         roiList.clearSelection();
 
         if (imagePanel != null) {
@@ -1677,15 +1804,14 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 true
         ));
 
-        selectedDetectionIndex = detections.size() - 1;
-
         refreshAfterEditing();
+        setSingleDetectionSelection(detections.size() - 1);
         updateStatus("Manual neuron added.");
     }
 
     private void deleteIfExists(File file) {
         if (file.exists() && !file.delete()) {
-            IJ.log("Warning: previous file could not be deleted: " + file.getAbsolutePath());
+            appendLog("Warning: previous file could not be deleted: " + file.getAbsolutePath());
         }
     }
 
@@ -1702,14 +1828,14 @@ public class NeuronTransferLearningWindowCommand implements Command {
                     deleteDirectory(file);
                 } else {
                     if (!file.delete()) {
-                        IJ.log("Warning: could not delete temp file: " + file.getAbsolutePath());
+                        appendLog("Warning: could not delete temp file: " + file.getAbsolutePath());
                     }
                 }
             }
         }
 
         if (!directory.delete()) {
-            IJ.log("Warning: could not delete temp directory: " + directory.getAbsolutePath());
+            appendLog("Warning: could not delete temp directory: " + directory.getAbsolutePath());
         }
     }
 
@@ -1723,7 +1849,21 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
         @Override
         public String toString() {
-            return file.getName() + " [" + status + "]";
+            String statusPrefix;
+
+            switch (status) {
+                case "annotated":
+                    statusPrefix = "[annotated] ";
+                    break;
+                case "detected":
+                    statusPrefix = "[detected] ";
+                    break;
+                default:
+                    statusPrefix = "[pending] ";
+                    break;
+            }
+
+            return statusPrefix + file.getName();
         }
     }
 
@@ -1774,6 +1914,9 @@ public class NeuronTransferLearningWindowCommand implements Command {
         private double lastMoveImageX;
         private double lastMoveImageY;
 
+        private boolean strokeSelecting = false;
+        private final List<Point> selectionStrokePoints = new ArrayList<>();
+
         private ImagePanel() {
             setPreferredSize(new Dimension(640, 480));
             setBackground(Color.DARK_GRAY);
@@ -1801,13 +1944,12 @@ public class NeuronTransferLearningWindowCommand implements Command {
                         int clickedIndex = findDetectionAt(imageX, imageY);
 
                         if (clickedIndex >= 0) {
-                            selectedDetectionIndex = clickedIndex;
-                            roiList.setSelectedIndex(clickedIndex);
+                            setSingleDetectionSelection(clickedIndex);
                             repaint();
                             return;
                         }
 
-                        selectedDetectionIndex = -1;
+                        selectedDetectionIndices.clear();
                         roiList.clearSelection();
 
                         drawing = true;
@@ -1823,18 +1965,40 @@ public class NeuronTransferLearningWindowCommand implements Command {
                     int clickedIndex = findDetectionAt(imageX, imageY);
 
                     if (clickedIndex >= 0) {
-                        selectedDetectionIndex = clickedIndex;
-                        roiList.setSelectedIndex(clickedIndex);
-                        roiList.ensureIndexIsVisible(clickedIndex);
+                        boolean multiSelect =
+                                e.isControlDown() ||
+                                        e.isMetaDown() ||
+                                        e.isShiftDown();
 
-                        movingSelected = true;
-                        lastMoveImageX = imageX;
-                        lastMoveImageY = imageY;
+                        if (multiSelect) {
+                            toggleDetectionSelection(clickedIndex);
+                            movingSelected = false;
+                        } else {
+                            setSingleDetectionSelection(clickedIndex);
+
+                            movingSelected = true;
+                            lastMoveImageX = imageX;
+                            lastMoveImageY = imageY;
+                        }
 
                         repaint();
                     } else {
-                        selectedDetectionIndex = -1;
-                        roiList.clearSelection();
+                        boolean strokeSelect =
+                                e.isShiftDown() ||
+                                        e.isControlDown() ||
+                                        e.isMetaDown();
+
+                        if (strokeSelect) {
+                            strokeSelecting = true;
+                            selectionStrokePoints.clear();
+                            selectionStrokePoints.add(new Point(e.getX(), e.getY()));
+
+                            updateStatus("Lasso selection enabled. Draw around neurons to select them.");
+                            repaint();
+                            return;
+                        }
+
+                        clearDetectionSelection();
                         repaint();
                     }
                 }
@@ -1848,11 +2012,17 @@ public class NeuronTransferLearningWindowCommand implements Command {
                         return;
                     }
 
-                    if (movingSelected) {
-                        int selectedIndex = selectedDetectionIndex;
+                    if (strokeSelecting) {
+                        selectionStrokePoints.add(new Point(e.getX(), e.getY()));
+                        repaint();
+                        return;
+                    }
 
-                        if (selectedIndex < 0 || selectedIndex >= detections.size()) {
-                            selectedIndex = roiList.getSelectedIndex();
+                    if (movingSelected) {
+                        int selectedIndex = roiList.getSelectedIndex();
+
+                        if (selectedDetectionIndices.size() == 1) {
+                            selectedIndex = selectedDetectionIndices.get(0);
                         }
 
                         if (selectedIndex < 0 || selectedIndex >= detections.size()) {
@@ -1885,6 +2055,18 @@ public class NeuronTransferLearningWindowCommand implements Command {
                         dragCurrentX = e.getX();
                         dragCurrentY = e.getY();
                         addManualDetectionFromDrag();
+                        repaint();
+                        return;
+                    }
+
+                    if (strokeSelecting) {
+                        strokeSelecting = false;
+
+                        selectDetectionsInsideLasso();
+
+                        selectionStrokePoints.clear();
+
+                        updateButtonState();
                         repaint();
                         return;
                     }
@@ -1996,24 +2178,94 @@ public class NeuronTransferLearningWindowCommand implements Command {
             if (drawing) {
                 drawTemporaryRoi((Graphics2D) g);
             }
+
+            if (strokeSelecting) {
+                drawSelectionStroke((Graphics2D) g);
+            }
+        }
+
+        private void drawSelectionStroke(Graphics2D g2) {
+            if (selectionStrokePoints.size() < 2) {
+                return;
+            }
+
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
+            g2.setColor(COLOR_LASSO);
+            g2.setStroke(new BasicStroke(
+                    2.5f,
+                    BasicStroke.CAP_ROUND,
+                    BasicStroke.JOIN_ROUND
+            ));
+
+            for (int i = 1; i < selectionStrokePoints.size(); i++) {
+                Point previous = selectionStrokePoints.get(i - 1);
+                Point current = selectionStrokePoints.get(i);
+
+                g2.drawLine(previous.x, previous.y, current.x, current.y);
+            }
         }
 
         private void drawDetections(Graphics2D g2) {
-            int selectedIndex = selectedDetectionIndex;
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
 
             for (int i = 0; i < detections.size(); i++) {
                 NeuronDetection detection = detections.get(i);
 
                 Color roiColor;
+                Stroke colorStroke;
+                Stroke shadowStroke;
 
-                if (i == selectedIndex) {
-                    roiColor = Color.ORANGE;
+                if (isDetectionSelected(i)) {
+                    roiColor = COLOR_SELECTED;
+                    colorStroke = new BasicStroke(3.2f);
+                    shadowStroke = new BasicStroke(4.6f);
                 } else if (detection.name.startsWith("MANUAL_")) {
-                    roiColor = Color.GREEN;
+                    roiColor = COLOR_MANUAL;
+                    colorStroke = new BasicStroke(
+                            2.4f,
+                            BasicStroke.CAP_ROUND,
+                            BasicStroke.JOIN_ROUND,
+                            10.0f,
+                            new float[]{8.0f, 5.0f},
+                            0.0f
+                    );
+                    shadowStroke = new BasicStroke(
+                            3.8f,
+                            BasicStroke.CAP_ROUND,
+                            BasicStroke.JOIN_ROUND,
+                            10.0f,
+                            new float[]{8.0f, 5.0f},
+                            0.0f
+                    );
                 } else if (detection.name.startsWith("ANNOTATION_")) {
-                    roiColor = Color.MAGENTA;
+                    roiColor = COLOR_ANNOTATION;
+                    colorStroke = new BasicStroke(
+                            2.1f,
+                            BasicStroke.CAP_ROUND,
+                            BasicStroke.JOIN_ROUND,
+                            10.0f,
+                            new float[]{2.5f, 4.0f},
+                            0.0f
+                    );
+                    shadowStroke = new BasicStroke(
+                            3.6f,
+                            BasicStroke.CAP_ROUND,
+                            BasicStroke.JOIN_ROUND,
+                            10.0f,
+                            new float[]{2.5f, 4.0f},
+                            0.0f
+                    );
                 } else {
-                    roiColor = Color.BLUE;
+                    roiColor = COLOR_AUTOMATIC;
+                    colorStroke = new BasicStroke(2.0f);
+                    shadowStroke = new BasicStroke(3.2f);
                 }
 
                 int x = (int) Math.round(offsetX + (detection.cx - detection.width / 2.0) * zoomFactor);
@@ -2021,15 +2273,24 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 int w = (int) Math.round(detection.width * zoomFactor);
                 int h = (int) Math.round(detection.height * zoomFactor);
 
+                g2.setColor(COLOR_OUTLINE_SHADOW);
+                g2.setStroke(shadowStroke);
+                g2.drawOval(x, y, w, h);
+
                 g2.setColor(roiColor);
-                g2.setStroke(new BasicStroke(i == selectedIndex ? 2.5f : 1.5f));
+                g2.setStroke(colorStroke);
                 g2.drawOval(x, y, w, h);
             }
         }
 
         private void drawTemporaryRoi(Graphics2D g2) {
-            g2.setColor(Color.GREEN);
-            g2.setStroke(new BasicStroke(2.0f));
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
+            g2.setColor(COLOR_TEMPORARY);
+            g2.setStroke(new BasicStroke(2.5f));
 
             int x = Math.min(dragStartX, dragCurrentX);
             int y = Math.min(dragStartY, dragCurrentY);
@@ -2049,6 +2310,38 @@ public class NeuronTransferLearningWindowCommand implements Command {
             }
 
             return -1;
+        }
+
+        private void selectDetectionsInsideLasso() {
+            if (selectionStrokePoints.size() < 3) {
+                return;
+            }
+
+            Polygon lasso = new Polygon();
+
+            for (Point point : selectionStrokePoints) {
+                lasso.addPoint(point.x, point.y);
+            }
+
+            int selectedCountBefore = selectedDetectionIndices.size();
+
+            for (int i = 0; i < detections.size(); i++) {
+                NeuronDetection detection = detections.get(i);
+
+                int screenX = (int) Math.round(offsetX + detection.cx * zoomFactor);
+                int screenY = (int) Math.round(offsetY + detection.cy * zoomFactor);
+
+                if (lasso.contains(screenX, screenY)) {
+                    if (!selectedDetectionIndices.contains(i)) {
+                        selectedDetectionIndices.add(i);
+                        roiList.addSelectionInterval(i, i);
+                    }
+                }
+            }
+
+            int selectedNow = selectedDetectionIndices.size() - selectedCountBefore;
+            updateStatus("Lasso selected " + selectedNow + " neuron(s). Total selected: " + selectedDetectionIndices.size());
+            updateButtonState();
         }
     }
 }
