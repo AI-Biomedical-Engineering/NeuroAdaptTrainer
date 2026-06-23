@@ -84,6 +84,14 @@ public class NeuronTransferLearningWindowCommand implements Command {
     private final String sessionId = UUID.randomUUID().toString();
     private File sessionDir;
 
+    private static final Color COLOR_AUTOMATIC = new Color(0, 170, 255);      // automatic YOLO detections
+    private static final Color COLOR_MANUAL = new Color(255, 190, 0);         // user-added neurons
+    private static final Color COLOR_ANNOTATION = new Color(190, 90, 255);    // saved corrected annotations
+    private static final Color COLOR_SELECTED = new Color(255, 80, 80);       // selected ROI
+    private static final Color COLOR_LASSO = new Color(255, 140, 0);          // lasso selection
+    private static final Color COLOR_TEMPORARY = new Color(0, 220, 160);      // ROI being drawn
+    private static final Color COLOR_OUTLINE_SHADOW = new Color(0, 0, 0, 100);
+
     @Override
     public void run() {
         SwingUtilities.invokeLater(this::createWindow);
@@ -1421,6 +1429,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
         boolean busy = detectionRunning || retrainingRunning;
 
         selectFolderButton.setEnabled(!busy);
+        detectImagesButton.setEnabled(hasFolder && !busy);
         correctButton.setEnabled(hasImage && hasDetections && !correctionMode && !busy);
         deleteSelectedButton.setEnabled(correctionMode && !selectedDetectionIndices.isEmpty() && !busy);
         addNeuronButton.setEnabled(correctionMode && !busy);
@@ -2180,9 +2189,14 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 return;
             }
 
-            g2.setColor(Color.ORANGE);
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
+            g2.setColor(COLOR_LASSO);
             g2.setStroke(new BasicStroke(
-                    2.0f,
+                    2.5f,
                     BasicStroke.CAP_ROUND,
                     BasicStroke.JOIN_ROUND
             ));
@@ -2196,19 +2210,62 @@ public class NeuronTransferLearningWindowCommand implements Command {
         }
 
         private void drawDetections(Graphics2D g2) {
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
             for (int i = 0; i < detections.size(); i++) {
                 NeuronDetection detection = detections.get(i);
 
                 Color roiColor;
+                Stroke colorStroke;
+                Stroke shadowStroke;
 
                 if (isDetectionSelected(i)) {
-                    roiColor = Color.ORANGE;
+                    roiColor = COLOR_SELECTED;
+                    colorStroke = new BasicStroke(3.2f);
+                    shadowStroke = new BasicStroke(4.6f);
                 } else if (detection.name.startsWith("MANUAL_")) {
-                    roiColor = Color.GREEN;
+                    roiColor = COLOR_MANUAL;
+                    colorStroke = new BasicStroke(
+                            2.4f,
+                            BasicStroke.CAP_ROUND,
+                            BasicStroke.JOIN_ROUND,
+                            10.0f,
+                            new float[]{8.0f, 5.0f},
+                            0.0f
+                    );
+                    shadowStroke = new BasicStroke(
+                            3.8f,
+                            BasicStroke.CAP_ROUND,
+                            BasicStroke.JOIN_ROUND,
+                            10.0f,
+                            new float[]{8.0f, 5.0f},
+                            0.0f
+                    );
                 } else if (detection.name.startsWith("ANNOTATION_")) {
-                    roiColor = Color.MAGENTA;
+                    roiColor = COLOR_ANNOTATION;
+                    colorStroke = new BasicStroke(
+                            2.1f,
+                            BasicStroke.CAP_ROUND,
+                            BasicStroke.JOIN_ROUND,
+                            10.0f,
+                            new float[]{2.5f, 4.0f},
+                            0.0f
+                    );
+                    shadowStroke = new BasicStroke(
+                            3.6f,
+                            BasicStroke.CAP_ROUND,
+                            BasicStroke.JOIN_ROUND,
+                            10.0f,
+                            new float[]{2.5f, 4.0f},
+                            0.0f
+                    );
                 } else {
-                    roiColor = Color.BLUE;
+                    roiColor = COLOR_AUTOMATIC;
+                    colorStroke = new BasicStroke(2.0f);
+                    shadowStroke = new BasicStroke(3.2f);
                 }
 
                 int x = (int) Math.round(offsetX + (detection.cx - detection.width / 2.0) * zoomFactor);
@@ -2216,15 +2273,24 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 int w = (int) Math.round(detection.width * zoomFactor);
                 int h = (int) Math.round(detection.height * zoomFactor);
 
+                g2.setColor(COLOR_OUTLINE_SHADOW);
+                g2.setStroke(shadowStroke);
+                g2.drawOval(x, y, w, h);
+
                 g2.setColor(roiColor);
-                g2.setStroke(new BasicStroke(isDetectionSelected(i) ? 2.5f : 1.5f));
+                g2.setStroke(colorStroke);
                 g2.drawOval(x, y, w, h);
             }
         }
 
         private void drawTemporaryRoi(Graphics2D g2) {
-            g2.setColor(Color.GREEN);
-            g2.setStroke(new BasicStroke(2.0f));
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
+            g2.setColor(COLOR_TEMPORARY);
+            g2.setStroke(new BasicStroke(2.5f));
 
             int x = Math.min(dragStartX, dragCurrentX);
             int y = Math.min(dragStartY, dragCurrentY);
