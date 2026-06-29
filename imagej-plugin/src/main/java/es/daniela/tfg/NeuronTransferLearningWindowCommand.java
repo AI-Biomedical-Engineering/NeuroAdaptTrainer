@@ -19,6 +19,8 @@ import java.util.List;
 import java.util.Properties;
 import java.util.Locale;
 import java.util.UUID;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 
 @Plugin(type = Command.class, menuPath = "Plugins>Neuron Segmentation>Transfer Learning Assistant")
 public class NeuronTransferLearningWindowCommand implements Command {
@@ -41,6 +43,8 @@ public class NeuronTransferLearningWindowCommand implements Command {
     private JLabel zoomLabel;
 
     private JTextArea logTextArea;
+    private File logFile;
+    private PrintWriter logWriter;
 
     private JScrollPane imageScrollPane;
     private ImagePanel imagePanel;
@@ -149,9 +153,13 @@ public class NeuronTransferLearningWindowCommand implements Command {
         frame.addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
             public void windowClosed(java.awt.event.WindowEvent e) {
+                appendLog("Closing transfer learning assistant.");
+
                 if (sessionDir != null) {
                     deleteDirectory(sessionDir);
                 }
+
+                closeLogFile();
             }
         });
 
@@ -398,6 +406,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             }
 
         } catch (Exception e) {
+            logError("Could not load configuration: " + e.getMessage());
             IJ.handleException(e);
         }
     }
@@ -469,6 +478,12 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
         try {
             initializeWorkDirForSelectedFolder();
+            initializeLogFile();
+
+            appendLog("Loaded Python executable: " + pythonExe);
+            appendLog("Loaded inference script: " + scriptPath);
+            appendLog("Loaded retraining script: " + retrainScriptPath);
+
             loadImageListFromFolder();
 
             folderLabel.setText(selectedFolder.getName());
@@ -476,6 +491,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             updateStatus("Folder selected: " + selectedFolder.getAbsolutePath());
 
         } catch (Exception e) {
+            logError("Could not load selected folder: " + e.getMessage());
             IJ.handleException(e);
             updateStatus("Could not load selected folder.");
         }
@@ -581,6 +597,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             updateButtonState();
 
         } catch (Exception e) {
+            logError("Could not load selected image: " + e.getMessage());
             IJ.handleException(e);
             updateStatus("Could not load selected image.");
         }
@@ -600,6 +617,23 @@ public class NeuronTransferLearningWindowCommand implements Command {
         detectionRunning = true;
         updateStatus("Detecting images... Please wait.");
         updateButtonState();
+
+        File activeModel = getActiveModelFile();
+
+        if (activeModel == null || !activeModel.exists()) {
+            logError("No active model found. Detection cancelled.");
+            IJ.error("No active model found. Please check the configuration or select a valid model.");
+            detectionRunning = false;
+            updateButtonState();
+            return;
+        }
+
+        appendLogSeparator();
+        appendLog("Detection process started.");
+        appendLog("Active model: " + activeModel.getAbsolutePath());
+        appendLog("Input folder: " + selectedFolder.getAbsolutePath());
+        appendLog("Detections folder: " + detectionsDir.getAbsolutePath());
+        appendLogSeparator();
 
         new Thread(() -> {
             try {
@@ -633,6 +667,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 });
 
             } catch (Exception e) {
+                logError("Detection failed: " + e.getMessage());
                 IJ.handleException(e);
 
                 SwingUtilities.invokeLater(() -> {
@@ -686,13 +721,21 @@ public class NeuronTransferLearningWindowCommand implements Command {
             throw new RuntimeException("Could not open image with ImageJ: " + imageFile.getAbsolutePath());
         }
 
-        boolean savedAsPng = new FileSaver(imp).saveAsPng(tempInputPng.getAbsolutePath());
+        try {
+            boolean savedAsPng = new FileSaver(imp).saveAsPng(tempInputPng.getAbsolutePath());
 
-        if (!savedAsPng || !tempInputPng.exists()) {
-            throw new RuntimeException("Could not save temporary PNG input for: " + imageFile.getName());
+            if (!savedAsPng || !tempInputPng.exists()) {
+                throw new RuntimeException("Could not save temporary PNG input for: " + imageFile.getName());
+            }
+        } finally {
+            imp.close();
         }
 
         File model = getActiveModelFile();
+
+        if (model == null || !model.exists()) {
+            throw new RuntimeException("No valid active model found for detection.");
+        }
 
         ProcessBuilder pb = new ProcessBuilder(
                 pythonExe,
@@ -718,7 +761,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             String line;
 
             while ((line = reader.readLine()) != null) {
-                appendLog(line);
+                logPython(line);
             }
         }
 
@@ -814,6 +857,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             appendLog("Training dataset will be rebuilt automatically before retraining.");
 
         } catch (Exception e) {
+            logError("Could not save annotation to training set: " + e.getMessage());
             IJ.handleException(e);
             updateStatus("Could not save annotation to training set.");
         }
@@ -869,6 +913,20 @@ public class NeuronTransferLearningWindowCommand implements Command {
         File outputModel = new File(modelsDir, modelName);
         File startModel = getActiveModelFile();
 
+        if (startModel == null || !startModel.exists()) {
+            logError("No valid starting model found. Retraining cancelled.");
+            IJ.error("No valid starting model found. Please check the configuration or select a valid model.");
+            return;
+        }
+
+        appendLogSeparator();
+        appendLog("Retraining process requested.");
+        appendLog("Training data YAML: " + dataYaml.getAbsolutePath());
+        appendLog("Starting model: " + startModel.getAbsolutePath());
+        appendLog("Output model: " + outputModel.getAbsolutePath());
+        appendLog("Training samples: " + annotatedCount);
+        appendLogSeparator();
+
         retrainingRunning = true;
         updateStatus("Retraining with " + annotatedCount + " available labelled images...");
         updateButtonState();
@@ -899,7 +957,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                     String line;
 
                     while ((line = reader.readLine()) != null) {
-                        appendLog(line);
+                        logPython(line);
                     }
                 }
 
@@ -930,6 +988,13 @@ public class NeuronTransferLearningWindowCommand implements Command {
                     updateStatus("Retraining completed: " + finalModelName);
                     updateButtonState();
 
+                    appendLog("Retraining completed successfully.");
+                    appendLog("Generated model: " + outputModel.getAbsolutePath());
+
+                    if (logFile != null) {
+                        appendLog("Session log saved to: " + logFile.getAbsolutePath());
+                    }
+
                     IJ.showMessage(
                             "Retraining completed",
                             "Model saved to:\n" + outputModel.getAbsolutePath()
@@ -937,6 +1002,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 });
 
             } catch (Exception e) {
+                logError("Retraining failed: " + e.getMessage());
                 IJ.handleException(e);
 
                 SwingUtilities.invokeLater(() -> {
@@ -996,7 +1062,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 ImagePlus imp = IJ.openImage(imageFile.getAbsolutePath());
 
                 if (imp == null) {
-                    appendLog("Skipping image because ImageJ could not open it: " + imageFile.getAbsolutePath());
+                    logWarning("Skipping image because ImageJ could not open it: " + imageFile.getAbsolutePath());
                     continue;
                 }
 
@@ -1004,7 +1070,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                     List<NeuronDetection> automaticDetections = readDetectionsFromCsv(detectionFile);
 
                     if (automaticDetections.isEmpty()) {
-                        appendLog("Skipping image without detections: " + imageFile.getName());
+                        logWarning("Skipping image without detections: " + imageFile.getName());
                         continue;
                     }
 
@@ -1047,7 +1113,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 String[] parts = line.split(",");
 
                 if (parts.length < 3) {
-                    appendLog("Skipping malformed CSV line: " + line);
+                    logWarning("Skipping malformed CSV line: " + line);
                     continue;
                 }
 
@@ -1124,7 +1190,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 clearDirectory(file);
 
                 if (!file.delete()) {
-                    appendLog("Warning: could not delete directory: " + file.getAbsolutePath());
+                    logWarning("Could not delete directory: " + file.getAbsolutePath());
                 }
             } else {
                 Files.deleteIfExists(file.toPath());
@@ -1163,6 +1229,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             updateStatus("Active model changed: " + selectedModel.getName());
 
         } catch (Exception e) {
+            logError("Could not change active model: " + e.getMessage());
             IJ.handleException(e);
             updateStatus("Could not change active model.");
         }
@@ -1193,7 +1260,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 }
 
             } catch (Exception e) {
-                appendLog("Could not read global active model. Falling back to base model.");
+                logWarning("Could not read global active model. Falling back to base model.");
             }
         }
 
@@ -1254,7 +1321,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             }
 
         } catch (Exception e) {
-            appendLog("Could not read folder active model.");
+            logWarning("Could not read folder active model.");
         }
 
         return null;
@@ -1397,6 +1464,59 @@ public class NeuronTransferLearningWindowCommand implements Command {
         return Math.max(min, Math.min(max, value));
     }
 
+    private void initializeLogFile() {
+        closeLogFile();
+
+        if (workDir == null) {
+            return;
+        }
+
+        try {
+            File logsDir = new File(workDir, "logs");
+
+            if (!logsDir.exists() && !logsDir.mkdirs()) {
+                logWarning("Could not create logs directory: " + logsDir.getAbsolutePath());
+                return;
+            }
+
+            String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+
+            logFile = new File(
+                    logsDir,
+                    "transfer_learning_session_" + timestamp + ".log"
+            );
+
+            logWriter = new PrintWriter(new FileWriter(logFile, true), true);
+
+            appendLogSeparator();
+            appendLog("Log file created: " + logFile.getAbsolutePath());
+            appendLog("Session id: " + sessionId);
+            appendLog("Selected folder: " + selectedFolder.getAbsolutePath());
+            appendLog("Work directory: " + workDir.getAbsolutePath());
+            appendLogSeparator();
+
+        } catch (Exception e) {
+            logError("Could not initialize log file: " + e.getMessage());
+            IJ.handleException(e);
+        }
+    }
+
+    private void closeLogFile() {
+        if (logWriter != null) {
+            logWriter.flush();
+            logWriter.close();
+            logWriter = null;
+        }
+    }
+
+    private String getCurrentTimestampForLog() {
+        return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date());
+    }
+
+    private void appendLogSeparator() {
+        appendLog("SYSTEM", "------------------------------------------------------------");
+    }
+
     private void updateStatus(String message) {
         int count = detections.size();
 
@@ -1412,14 +1532,46 @@ public class NeuronTransferLearningWindowCommand implements Command {
             statusLabel.setText(fullMessage);
         }
 
-        appendLog("[Transfer Learning] " + message);
+        appendLog("STATUS", message);
     }
 
-    private void appendLog(String message) {
+    private synchronized void appendLog(String message) {
+        appendLog("INFO", message);
+    }
+
+    private synchronized void appendLog(String level, String message) {
+        String timestampedMessage =
+                "[" + getCurrentTimestampForLog() + "] " +
+                        "[" + level + "] " +
+                        message;
+
         if (logTextArea != null) {
-            logTextArea.append(message + "\n");
-            logTextArea.setCaretPosition(logTextArea.getDocument().getLength());
+            SwingUtilities.invokeLater(() -> {
+                logTextArea.append(timestampedMessage + "\n");
+                logTextArea.setCaretPosition(logTextArea.getDocument().getLength());
+            });
         }
+
+        if (logWriter != null) {
+            logWriter.println(timestampedMessage);
+            logWriter.flush();
+        }
+    }
+
+    private void logInfo(String message) {
+        appendLog("INFO", message);
+    }
+
+    private void logWarning(String message) {
+        appendLog("WARNING", message);
+    }
+
+    private void logError(String message) {
+        appendLog("ERROR", message);
+    }
+
+    private void logPython(String message) {
+        appendLog("PYTHON", message);
     }
 
     private void updateButtonState() {
@@ -1655,7 +1807,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 }
 
             } catch (Exception e) {
-                appendLog("Could not use original mask polygon for " + detection.name + ". Falling back to ellipse.");
+                logWarning("Could not use original mask polygon for " + detection.name + ". Falling back to ellipse.");
             }
         }
 
@@ -1684,7 +1836,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 );
 
                 if (polygon.size() < 6) {
-                    appendLog("Skipping invalid polygon for detection: " + detection.name);
+                    logWarning("Skipping invalid polygon for detection: " + detection.name);
                     continue;
                 }
 
@@ -1713,7 +1865,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 );
 
                 if (polygon.size() < 6) {
-                    appendLog("Skipping invalid polygon for detection: " + detection.name);
+                    logWarning("Skipping invalid polygon for detection: " + detection.name);
                     continue;
                 }
 
@@ -1811,7 +1963,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
     private void deleteIfExists(File file) {
         if (file.exists() && !file.delete()) {
-            appendLog("Warning: previous file could not be deleted: " + file.getAbsolutePath());
+            logWarning("Previous file could not be deleted: " + file.getAbsolutePath());
         }
     }
 
@@ -1828,14 +1980,14 @@ public class NeuronTransferLearningWindowCommand implements Command {
                     deleteDirectory(file);
                 } else {
                     if (!file.delete()) {
-                        appendLog("Warning: could not delete temp file: " + file.getAbsolutePath());
+                        logWarning("Could not delete temp file: " + file.getAbsolutePath());
                     }
                 }
             }
         }
 
         if (!directory.delete()) {
-            appendLog("Warning: could not delete temp directory: " + directory.getAbsolutePath());
+            logWarning("Could not delete temp directory: " + directory.getAbsolutePath());
         }
     }
 
