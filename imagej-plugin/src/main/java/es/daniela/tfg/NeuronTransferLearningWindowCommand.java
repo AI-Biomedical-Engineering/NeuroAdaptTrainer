@@ -39,7 +39,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
     private JLabel statusLabel;
     private JLabel folderLabel;
-    private JLabel modelLabel;
+    private JTextField modelLabel;
     private JLabel zoomLabel;
 
     private JTextArea logTextArea;
@@ -254,56 +254,81 @@ public class NeuronTransferLearningWindowCommand implements Command {
     }
 
     private JPanel createRightPanel() {
-        JPanel wrapper = new JPanel(new BorderLayout());
-        wrapper.setPreferredSize(new Dimension(230, 0));
+        JPanel wrapper = new JPanel(new BorderLayout(6, 6));
+        wrapper.setPreferredSize(new Dimension(285, 0));
+        wrapper.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+
+        JPanel topPanel = new JPanel();
+        topPanel.setLayout(new BoxLayout(topPanel, BoxLayout.Y_AXIS));
+
+        JPanel infoPanel = new JPanel(new BorderLayout(4, 4));
+        infoPanel.setBorder(BorderFactory.createTitledBorder("Mode"));
+
+        JLabel infoLabel = new JLabel(
+                "<html>" +
+                        "Process a full image folder.<br><br>" +
+                        "Detect neurons, review corrections, save annotations " +
+                        "and retrain the active model." +
+                        "</html>"
+        );
+
+        infoLabel.setFont(infoLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        infoLabel.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+
+        infoPanel.add(infoLabel, BorderLayout.CENTER);
+
+        JPanel modelPanel = new JPanel(new BorderLayout(4, 4));
+        modelPanel.setBorder(BorderFactory.createTitledBorder("Active model"));
+
+        modelLabel = new JTextField("No model selected");
+        modelLabel.setEditable(false);
+        modelLabel.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+        modelLabel.setToolTipText("Current model used for folder detection and retraining");
+        modelLabel.setHorizontalAlignment(JTextField.LEFT);
+
+        changeModelButton = new JButton("Change model");
+        styleActionButton(changeModelButton, false);
+        changeModelButton.addActionListener(e -> changeActiveModel());
+
+        modelPanel.add(modelLabel, BorderLayout.CENTER);
+        modelPanel.add(changeModelButton, BorderLayout.SOUTH);
 
         JPanel actionsPanel = new JPanel();
-        actionsPanel.setLayout(new GridLayout(6, 1, 8, 8));
+        actionsPanel.setLayout(new GridLayout(5, 1, 8, 8));
         actionsPanel.setBorder(BorderFactory.createTitledBorder("Actions"));
 
         selectFolderButton = new JButton("1. Select folder");
         detectImagesButton = new JButton("2. Detect images");
         correctButton = new JButton("3. Correct image");
-        saveToTrainingSetButton = new JButton("4. Save to training set");
+        saveToTrainingSetButton = new JButton("4. Save corrections");
         retrainButton = new JButton("5. Retrain model");
-        changeModelButton = new JButton("Change model");
-        deleteSelectedButton = new JButton("Delete");
-        addNeuronButton = new JButton("Add");
-        undoButton = new JButton("↶ Undo");
+
+        styleActionButton(selectFolderButton, false);
+        styleActionButton(detectImagesButton, false);
+        styleActionButton(correctButton, false);
+        styleActionButton(saveToTrainingSetButton, false);
+        styleActionButton(retrainButton, true);
 
         selectFolderButton.addActionListener(e -> selectFolder());
         detectImagesButton.addActionListener(e -> detectImages());
         correctButton.addActionListener(e -> enableCorrectionMode());
-        deleteSelectedButton.addActionListener(e -> deleteSelectedDetection());
         saveToTrainingSetButton.addActionListener(e -> saveToTrainingSet());
-        undoButton.addActionListener(e -> undoLastChange());
         retrainButton.addActionListener(e -> retrainModel());
-        changeModelButton.addActionListener(e -> changeActiveModel());
-
-        addNeuronButton.addActionListener(e -> {
-            addNeuronMode = !addNeuronMode;
-
-            if (addNeuronMode) {
-                addNeuronButton.setText("Stop add");
-                updateStatus("Add neuron mode enabled. Click and drag to add missing neurons.");
-            } else {
-                addNeuronButton.setText("Add");
-                updateStatus("Add neuron mode disabled.");
-            }
-
-            updateButtonState();
-            imagePanel.repaint();
-        });
 
         actionsPanel.add(selectFolderButton);
         actionsPanel.add(detectImagesButton);
         actionsPanel.add(correctButton);
         actionsPanel.add(saveToTrainingSetButton);
         actionsPanel.add(retrainButton);
-        actionsPanel.add(changeModelButton);
 
-        JPanel roiPanel = new JPanel(new BorderLayout());
-        roiPanel.setBorder(BorderFactory.createTitledBorder("ROI list"));
+        topPanel.add(infoPanel);
+        topPanel.add(Box.createVerticalStrut(8));
+        topPanel.add(modelPanel);
+        topPanel.add(Box.createVerticalStrut(8));
+        topPanel.add(actionsPanel);
+
+        JPanel neuronPanel = new JPanel(new BorderLayout());
+        neuronPanel.setBorder(BorderFactory.createTitledBorder("Neuron list"));
 
         roiListModel = new DefaultListModel<>();
         roiList = new JList<>(roiListModel);
@@ -327,27 +352,57 @@ public class NeuronTransferLearningWindowCommand implements Command {
             }
         });
 
-        JPanel roiActionsPanel = new JPanel(new GridLayout(1, 3, 4, 4));
-        roiActionsPanel.setBorder(BorderFactory.createEmptyBorder(2, 2, 4, 2));
+        deleteSelectedButton = new JButton("Delete");
+        addNeuronButton = new JButton("Add");
+        undoButton = new JButton("↶ Undo");
 
-        roiActionsPanel.add(deleteSelectedButton);
-        roiActionsPanel.add(addNeuronButton);
-        roiActionsPanel.add(undoButton);
+        styleActionButton(deleteSelectedButton, false);
+        styleActionButton(addNeuronButton, false);
+        styleActionButton(undoButton, false);
 
-        roiPanel.add(roiActionsPanel, BorderLayout.NORTH);
-        roiPanel.add(new JScrollPane(roiList), BorderLayout.CENTER);
+        deleteSelectedButton.addActionListener(e -> deleteSelectedDetection());
+        undoButton.addActionListener(e -> undoLastChange());
 
-        JPanel modelPanel = new JPanel(new BorderLayout());
-        modelPanel.setBorder(BorderFactory.createTitledBorder("Model"));
-        modelLabel = new JLabel("Base model");
-        modelLabel.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
-        modelPanel.add(modelLabel, BorderLayout.CENTER);
+        addNeuronButton.addActionListener(e -> {
+            addNeuronMode = !addNeuronMode;
 
-        wrapper.add(actionsPanel, BorderLayout.NORTH);
-        wrapper.add(roiPanel, BorderLayout.CENTER);
-        wrapper.add(modelPanel, BorderLayout.SOUTH);
+            if (addNeuronMode) {
+                addNeuronButton.setText("Stop add");
+                updateStatus("Add neuron mode enabled. Click and drag to add missing neurons.");
+            } else {
+                addNeuronButton.setText("Add");
+                updateStatus("Add neuron mode disabled.");
+            }
+
+            updateButtonState();
+            imagePanel.repaint();
+        });
+
+        JPanel neuronActionsPanel = new JPanel(new GridLayout(1, 3, 4, 4));
+        neuronActionsPanel.setBorder(BorderFactory.createEmptyBorder(2, 2, 4, 2));
+
+        neuronActionsPanel.add(deleteSelectedButton);
+        neuronActionsPanel.add(addNeuronButton);
+        neuronActionsPanel.add(undoButton);
+
+        neuronPanel.add(neuronActionsPanel, BorderLayout.NORTH);
+        neuronPanel.add(new JScrollPane(roiList), BorderLayout.CENTER);
+
+        wrapper.add(topPanel, BorderLayout.NORTH);
+        wrapper.add(neuronPanel, BorderLayout.CENTER);
 
         return wrapper;
+    }
+
+    private void styleActionButton(JButton button, boolean primary) {
+        button.setAlignmentX(Component.CENTER_ALIGNMENT);
+        button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 34));
+        button.setFocusPainted(false);
+        button.setMargin(new Insets(6, 10, 6, 10));
+
+        if (primary) {
+            button.setFont(button.getFont().deriveFont(Font.BOLD));
+        }
     }
 
     private JPanel createBottomPanel() {
@@ -822,6 +877,11 @@ public class NeuronTransferLearningWindowCommand implements Command {
     }
 
     private void saveToTrainingSet() {
+        if (!correctionMode) {
+            IJ.error("Enable correction mode before saving corrections.");
+            return;
+        }
+
         if (currentImageFile == null || sourceImage == null) {
             IJ.error("Please select an image first.");
             return;
@@ -858,6 +918,8 @@ public class NeuronTransferLearningWindowCommand implements Command {
             undoState = null;
             selectedDetectionIndices.clear();
             roiList.clearSelection();
+
+            addNeuronButton.setText("Add");
 
             refreshImageStatus(currentImageFile, "annotated");
 
@@ -1361,12 +1423,19 @@ public class NeuronTransferLearningWindowCommand implements Command {
     }
 
     private void updateModelLabel() {
+        if (modelLabel == null) {
+            return;
+        }
+
         File model = getActiveModelFile();
 
         if (model != null && model.exists()) {
             modelLabel.setText(model.getName());
+            modelLabel.setCaretPosition(0);
+            modelLabel.setToolTipText(model.getAbsolutePath());
         } else {
             modelLabel.setText("No model selected");
+            modelLabel.setToolTipText(null);
         }
     }
 
@@ -1595,10 +1664,13 @@ public class NeuronTransferLearningWindowCommand implements Command {
         selectFolderButton.setEnabled(!busy);
         detectImagesButton.setEnabled(hasFolder && !busy);
         correctButton.setEnabled(hasImage && hasDetections && !correctionMode && !busy);
+
         deleteSelectedButton.setEnabled(correctionMode && !selectedDetectionIndices.isEmpty() && !busy);
         addNeuronButton.setEnabled(correctionMode && !busy);
         undoButton.setEnabled(correctionMode && undoState != null && !busy);
-        saveToTrainingSetButton.setEnabled(hasImage && hasDetections && !addNeuronMode && !busy);
+
+        saveToTrainingSetButton.setEnabled(correctionMode && hasImage && hasDetections && !busy);
+
         retrainButton.setEnabled(hasFolder && !busy);
         changeModelButton.setEnabled(!busy);
     }
@@ -1942,7 +2014,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
         undoState = null;
         selectedDetectionIndices.clear();
         addNeuronMode = false;
-        addNeuronButton.setText("+ Add");
+        addNeuronButton.setText("Add");
 
         refreshAfterEditing();
 
