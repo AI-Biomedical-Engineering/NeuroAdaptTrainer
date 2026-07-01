@@ -11,6 +11,7 @@ INFERENCE_DIR="$PROJECT_ROOT/yolo-inference"
 VENV_DIR="$PROJECT_ROOT/venv"
 CONFIG_DIR="$HOME/.neuron-segmentation-assistant"
 CONFIG_FILE="$CONFIG_DIR/config.properties"
+COMPARE_SCRIPT="$INFERENCE_DIR/compare_models.py"
 
 echo "Project root: $PROJECT_ROOT"
 echo "Inference directory: $INFERENCE_DIR"
@@ -45,6 +46,7 @@ cat > "$CONFIG_FILE" <<EOF
 python=$VENV_DIR/bin/python
 script=$INFERENCE_DIR/infer_one.py
 retrain_script=$INFERENCE_DIR/retrain_model.py
+compare_script=$INFERENCE_DIR/compare_models.py
 EOF
 
 echo ""
@@ -56,3 +58,5 @@ echo "You can now open Fiji and run:"
 echo "Plugins > Neuron Segmentation > Single Image Segmentation"
 echo "or:"
 echo "Plugins > Neuron Segmentation > Transfer Learning Assistant"
+echo "or:"
+echo "Plugins > Neuron Segmentation > Model Comparison / External Validation"
