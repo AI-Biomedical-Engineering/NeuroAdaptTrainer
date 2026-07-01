@@ -74,12 +74,23 @@ if [ ! -f "installers/mac/install_mac.sh" ]; then
     exit 1
 fi
 
-osascript -e 'display dialog "Installing Neuron Segmentation Assistant. This may take several minutes." buttons {"OK"} default button "OK"'
+osascript -e 'display dialog "Installing Neuron Segmentation Assistant. This may take several minutes. A progress window will remain open while the installation is running." buttons {"OK"} default button "OK"'
 
 chmod +x installers/mac/install_mac.sh
-./installers/mac/install_mac.sh
 
+osascript &lt;&lt;'APPLESCRIPT' &amp;
+tell application "System Events"
+    activate
+    display dialog "Installing Neuron Segmentation Assistant...\n\nPlease wait. This may take several minutes.\n\nDo not close this window until the installation finishes." buttons {"Installing..."} default button "Installing..." giving up after 3600
+end tell
+APPLESCRIPT
+
+PROGRESS_PID=$!
+
+./installers/mac/install_mac.sh
 RESULT=$?
+
+kill "$PROGRESS_PID" 2&gt;/dev/null
 
 if [ $RESULT -eq 0 ]; then
     osascript -e 'display dialog "Installation completed successfully. You can now open Fiji and run the plugin." buttons {"OK"} default button "OK"'
@@ -195,12 +206,10 @@ fi</string>
 						<string>4</string>
 					</dict>
 				</dict>
-				<key>conversionLabel</key>
-				<integer>0</integer>
 				<key>isViewVisible</key>
 				<integer>1</integer>
 				<key>location</key>
-				<string>309.000000:403.000000</string>
+				<string>300.500000:698.000000</string>
 				<key>nibPath</key>
 				<string>/System/Library/Automator/Run Shell Script.action/Contents/Resources/Base.lproj/main.nib</string>
 			</dict>
