@@ -58,6 +58,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
     private JButton saveToTrainingSetButton;
     private JButton retrainButton;
     private JButton changeModelButton;
+    private JCheckBox useHardwareAccelerationCheckBox;
     private JButton zoomInButton;
     private JButton zoomOutButton;
     private JButton fitButton;
@@ -83,6 +84,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
     private boolean addNeuronMode = false;
     private boolean detectionRunning = false;
     private boolean retrainingRunning = false;
+    private boolean useHardwareAccelerationForRetraining = false;
 
     private double zoomFactor = 1.0;
     private boolean fitToPanel = true;
@@ -97,6 +99,10 @@ public class NeuronTransferLearningWindowCommand implements Command {
     private static final Color COLOR_LASSO = new Color(255, 140, 0);          // lasso selection
     private static final Color COLOR_TEMPORARY = new Color(0, 220, 160);      // ROI being drawn
     private static final Color COLOR_OUTLINE_SHADOW = new Color(0, 0, 0, 100);
+
+    private static final String CONFIG_DIR_NAME = ".neuron-segmentation-assistant";
+    private static final String CONFIG_FILE_NAME = "config.properties";
+    private static final String CONFIG_USE_HARDWARE_ACCELERATION = "use_hardware_acceleration";
 
     @Override
     public void run() {
@@ -290,8 +296,35 @@ public class NeuronTransferLearningWindowCommand implements Command {
         styleActionButton(changeModelButton, false);
         changeModelButton.addActionListener(e -> changeActiveModel());
 
+        useHardwareAccelerationCheckBox = new JCheckBox("Use hardware acceleration");
+        useHardwareAccelerationCheckBox.setSelected(useHardwareAccelerationForRetraining);
+        useHardwareAccelerationCheckBox.setFont(useHardwareAccelerationCheckBox.getFont().deriveFont(Font.PLAIN, 11f));
+        useHardwareAccelerationCheckBox.setToolTipText(
+                "If enabled, retraining will request the best available hardware acceleration."
+        );
+
+        useHardwareAccelerationCheckBox.addActionListener(e -> {
+            saveHardwareAccelerationPreference(useHardwareAccelerationCheckBox.isSelected());
+
+            if (useHardwareAccelerationCheckBox.isSelected()) {
+                updateStatus("Hardware acceleration enabled for retraining.");
+            } else {
+                updateStatus("CPU retraining selected.");
+            }
+        });
+
+        JPanel modelBottomPanel = new JPanel();
+        modelBottomPanel.setLayout(new BoxLayout(modelBottomPanel, BoxLayout.Y_AXIS));
+
+        changeModelButton.setAlignmentX(Component.CENTER_ALIGNMENT);
+        useHardwareAccelerationCheckBox.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        modelBottomPanel.add(changeModelButton);
+        modelBottomPanel.add(Box.createVerticalStrut(4));
+        modelBottomPanel.add(useHardwareAccelerationCheckBox);
+
         modelPanel.add(modelLabel, BorderLayout.CENTER);
-        modelPanel.add(changeModelButton, BorderLayout.SOUTH);
+        modelPanel.add(modelBottomPanel, BorderLayout.SOUTH);
 
         JPanel actionsPanel = new JPanel();
         actionsPanel.setLayout(new GridLayout(5, 1, 8, 8));
@@ -394,6 +427,42 @@ public class NeuronTransferLearningWindowCommand implements Command {
         return wrapper;
     }
 
+    private void saveHardwareAccelerationPreference(boolean useHardwareAcceleration) {
+        useHardwareAccelerationForRetraining = useHardwareAcceleration;
+
+        File configFile = new File(
+                System.getProperty("user.home"),
+                CONFIG_DIR_NAME + "/" + CONFIG_FILE_NAME
+        );
+
+        try {
+            Properties properties = new Properties();
+
+            if (configFile.exists()) {
+                try (FileInputStream fis = new FileInputStream(configFile)) {
+                    properties.load(fis);
+                }
+            }
+
+            properties.setProperty(
+                    CONFIG_USE_HARDWARE_ACCELERATION,
+                    Boolean.toString(useHardwareAcceleration)
+            );
+
+            configFile.getParentFile().mkdirs();
+
+            try (FileOutputStream fos = new FileOutputStream(configFile)) {
+                properties.store(fos, "Neuron Segmentation Assistant configuration");
+            }
+
+            appendLog("Hardware acceleration preference saved: " + useHardwareAcceleration);
+
+        } catch (Exception e) {
+            logError("Could not save hardware acceleration preference: " + e.getMessage());
+            IJ.handleException(e);
+        }
+    }
+
     private void styleActionButton(JButton button, boolean primary) {
         button.setAlignmentX(Component.CENTER_ALIGNMENT);
         button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 34));
@@ -452,6 +521,10 @@ public class NeuronTransferLearningWindowCommand implements Command {
             pythonExe = properties.getProperty("python");
             scriptPath = properties.getProperty("script");
             retrainScriptPath = properties.getProperty("retrain_script");
+
+            useHardwareAccelerationForRetraining = Boolean.parseBoolean(
+                    properties.getProperty(CONFIG_USE_HARDWARE_ACCELERATION, "false")
+            );
 
             appendLog("Loaded config file: " + configFile.getAbsolutePath());
             appendLog("Loaded Python executable: " + pythonExe);
@@ -1005,23 +1078,40 @@ public class NeuronTransferLearningWindowCommand implements Command {
         updateStatus("Retraining with " + annotatedCount + " available labelled images...");
         updateButtonState();
 
+        boolean useHardwareAcceleration =
+                useHardwareAccelerationCheckBox != null && useHardwareAccelerationCheckBox.isSelected();
+
         String finalModelName = modelName;
 
         new Thread(() -> {
             try {
-                ProcessBuilder pb = new ProcessBuilder(
-                        pythonExe,
-                        "-u",
-                        retrainScriptPath,
-                        dataYaml.getAbsolutePath(),
-                        outputModel.getAbsolutePath(),
-                        startModel.getAbsolutePath()
-                );
+                List<String> command = new ArrayList<>();
+
+                command.add(pythonExe);
+                command.add("-u");
+                command.add(retrainScriptPath);
+                command.add(dataYaml.getAbsolutePath());
+                command.add(outputModel.getAbsolutePath());
+                command.add(startModel.getAbsolutePath());
+
+                String selectedDevice;
+
+                if (useHardwareAcceleration) {
+                    selectedDevice = "auto_acceleration";
+                } else {
+                    selectedDevice = "cpu";
+                }
+
+                command.add(selectedDevice);
+
+                ProcessBuilder pb = new ProcessBuilder(command);
 
                 pb.redirectErrorStream(true);
 
                 appendLog("Running transfer learning:");
                 appendLog(String.join(" ", pb.command()));
+
+                appendLog("Requested training device: " + selectedDevice);
 
                 Process process = pb.start();
 
@@ -1673,6 +1763,10 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
         retrainButton.setEnabled(hasFolder && !busy);
         changeModelButton.setEnabled(!busy);
+
+        if (useHardwareAccelerationCheckBox != null) {
+            useHardwareAccelerationCheckBox.setEnabled(!busy);
+        }
     }
 
     private void updateDisplayedImage() {
