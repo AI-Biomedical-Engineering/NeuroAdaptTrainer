@@ -112,7 +112,7 @@ def write_metrics_csv(output_file, base_metrics, adapted_metrics):
 
     with open(output_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["metric", "base_model", "transfer_learning_model", "difference"])
+        writer.writerow(["metric", "base_model", "adapted_model", "difference"])
 
         for key in ordered_keys:
             base_value = base_metrics.get(key, "")
@@ -175,7 +175,7 @@ def write_summary(output_file, base_metrics, adapted_metrics, resolved_device):
         if best_map_name is not None:
             f.write(f"Main metric: {best_map_name}\n")
             f.write(f"Base model: {format_metric_value(base_map)}\n")
-            f.write(f"Transfer learning model: {format_metric_value(adapted_map)}\n")
+            f.write(f"Adapted model: {format_metric_value(adapted_map)}\n")
 
             base_number = as_float_or_none(base_map)
             adapted_number = as_float_or_none(adapted_map)
@@ -189,7 +189,7 @@ def write_summary(output_file, base_metrics, adapted_metrics, resolved_device):
             f.write(
                 f"- {metric_name}: "
                 f"base={format_metric_value(base_value)}, "
-                f"transfer_learning={format_metric_value(adapted_value)}"
+                f"adapted={format_metric_value(adapted_value)}"
             )
 
             if difference != "":
@@ -230,7 +230,7 @@ def main():
             raise RuntimeError(f"Base model not found: {base_model}")
 
         if not adapted_model.exists():
-            raise RuntimeError(f"Transfer learning model not found: {adapted_model}")
+            raise RuntimeError(f"Adapted model not found: {adapted_model}")
 
         if not data_yaml.exists():
             raise RuntimeError(f"Validation data.yaml not found: {data_yaml}")
@@ -239,7 +239,7 @@ def main():
 
         print("Comparing models...", flush=True)
         print(f"BASE_MODEL: {base_model}", flush=True)
-        print(f"TRANSFER_LEARNING_MODEL: {adapted_model}", flush=True)
+        print(f"ADAPTED_MODEL: {adapted_model}", flush=True)
         print(f"DATA_YAML: {data_yaml}", flush=True)
         print(f"OUTPUT_DIR: {output_dir}", flush=True)
         print(f"REQUESTED_DEVICE: {requested_device if requested_device else 'auto'}", flush=True)
@@ -256,12 +256,12 @@ def main():
             resolved_device
         )
 
-        print("\nValidating transfer learning model...", flush=True)
+        print("\nValidating adapted model...", flush=True)
         adapted_metrics = validate_model(
             adapted_model,
             data_yaml,
             output_dir,
-            "transfer_learning_model_validation",
+            "adapted_model_validation",
             resolved_device
         )
 
@@ -276,7 +276,7 @@ def main():
         print(f"Summary saved to: {output_summary}", flush=True)
 
         print_metrics("Base model metrics:", base_metrics)
-        print_metrics("Transfer learning model metrics:", adapted_metrics)
+        print_metrics("Adapted model metrics:", adapted_metrics)
 
     except Exception:
         print("ERROR in compare_models.py:", flush=True)
