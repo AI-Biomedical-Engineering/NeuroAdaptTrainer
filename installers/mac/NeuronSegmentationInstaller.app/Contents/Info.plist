@@ -36,11 +36,11 @@
 	<key>CFBundleIconName</key>
 	<string>ApplicationStub</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.apple.automator.Sin-ti-tulo</string>
+	<string>com.apple.automator.NeuronSegmentationInstaller</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Sin título</string>
+	<string>NeuronSegmentationInstaller</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

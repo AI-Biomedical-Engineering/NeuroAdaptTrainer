@@ -14,6 +14,7 @@ $ConfigFile = Join-Path $ConfigDir "config.properties"
 $PythonExe = Join-Path $VenvDir "Scripts\python.exe"
 $InferScript = Join-Path $InferenceDir "infer_one.py"
 $RetrainScript = Join-Path $InferenceDir "retrain_model.py"
+$CompareScript = Join-Path $InferenceDir "compare_models.py"
 $RequirementsFile = Join-Path $InferenceDir "requirements.txt"
 
 Write-Host "Project root: $ProjectRoot"
@@ -52,11 +53,13 @@ New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
 $PythonConfig = $PythonExe.Replace("\", "/")
 $InferConfig = $InferScript.Replace("\", "/")
 $RetrainConfig = $RetrainScript.Replace("\", "/")
+$CompareConfig = $CompareScript.Replace("\", "/")
 
 $ConfigContent = @"
 python=$PythonConfig
 script=$InferConfig
 retrain_script=$RetrainConfig
+compare_script=$CompareConfig
 "@
 
 $Utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
@@ -71,6 +74,8 @@ Write-Host "You can now open Fiji and run:"
 Write-Host "Plugins > Neuron Segmentation > Single Image Segmentation"
 Write-Host "or:"
 Write-Host "Plugins > Neuron Segmentation > Transfer Learning Assistant"
+Write-Host "or:"
+Write-Host "Plugins > Neuron Segmentation > Model Comparison / External Validation"
 Write-Host ""
 
 pause
