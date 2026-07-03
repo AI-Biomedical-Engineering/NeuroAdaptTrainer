@@ -2,9 +2,9 @@ package es.daniela.tfg;
 
 import ij.IJ;
 import ij.ImagePlus;
+import ij.ImageListener;
 import ij.WindowManager;
 import ij.io.FileSaver;
-import ij.ImageListener;
 
 import org.scijava.command.Command;
 import org.scijava.plugin.Plugin;
@@ -15,65 +15,64 @@ import java.awt.image.BufferedImage;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.*;
+import java.nio.file.Files;
 import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.Set;
+import java.util.List;
 import java.util.Properties;
-import java.util.Locale;
+import java.util.Set;
+import java.util.UUID;
 
 @Plugin(type = Command.class, menuPath = "Plugins>Neuron Segmentation>Single Image Segmentation")
 public class NeuronSegmentationAssistantWindowCommand implements Command, ImageListener {
 
     private String pythonExe;
     private String scriptPath;
-    private String retrainScriptPath;
 
     private JFrame frame;
+
     private DefaultListModel<String> roiListModel;
     private JList<String> roiList;
+
     private JLabel statusLabel;
+    private JLabel zoomLabel;
+    private JTextField modelLabel;
 
     private JScrollPane imageScrollPane;
-    private JLabel zoomLabel;
+    private ImagePanel imagePanel;
+
+    private JButton importImageButton;
+    private JButton changeModelButton;
+    private JButton detectButton;
+    private JButton openTransferLearningButton;
 
     private JButton zoomInButton;
     private JButton zoomOutButton;
     private JButton fitButton;
     private JButton actualSizeButton;
 
+    private ImagePlus sourceImage;
     private ImagePlus imageToDisplay;
+
+    private File activeModelFile;
+
+    private final List<NeuronDetection> detections = new ArrayList<>();
+
+    private boolean detectionRunning = false;
+
     private double zoomFactor = 1.0;
     private boolean fitToPanel = true;
 
-    private JButton importImageButton;
-    private JButton deleteSelectedButton;
-    private JButton addNeuronButton;
-    private boolean addNeuronMode = false;
-    private boolean correctionMode = false;
-    private boolean detectionRunning = false;
-    private boolean retrainingRunning = false;
-    private String currentMessage = "Ready.";
-
-    private ImagePanel imagePanel;
-
-    private JButton detectButton;
-    private JButton correctButton;
-    private JButton saveButton;
-    private JButton retrainButton;
-
-    private ImagePlus sourceImage;
-    private ImagePlus detectedImage;
-    private final List<NeuronDetection> detections = new ArrayList<>();
-    private int selectedDetectionIndex = -1;
     private final String sessionId = UUID.randomUUID().toString();
     private File sessionDir;
 
-    // Images imported from the assistant should not be auto-loaded by other assistant windows.
     private static final Set<Integer> ASSISTANT_IMPORTED_IMAGE_IDS =
             Collections.synchronizedSet(new HashSet<>());
+
+    private static final Color COLOR_AUTOMATIC = new Color(0, 170, 255);
+    private static final Color COLOR_SELECTED = new Color(255, 80, 80);
+    private static final Color COLOR_OUTLINE_SHADOW = new Color(0, 0, 0, 100);
 
     @Override
     public void run() {
@@ -89,25 +88,40 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         );
 
         if (!sessionDir.exists() && !sessionDir.mkdirs()) {
-            IJ.log("Warning: could not create session directory: " + sessionDir.getAbsolutePath());
+            logToConsole("Warning: could not create session directory: " + sessionDir.getAbsolutePath());
         } else {
-            IJ.log("Temporary session directory: " + sessionDir.getAbsolutePath());
+            logToConsole("Temporary session directory: " + sessionDir.getAbsolutePath());
         }
 
         sourceImage = getCurrentOrFirstImage();
 
         frame = new JFrame("Single Image Neuron Segmentation");
         frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
-        frame.setSize(1050, 720);
+        frame.setSize(1150, 760);
         frame.setLayout(new BorderLayout(8, 8));
 
-        frame.add(createLeftPanel(), BorderLayout.WEST);
-        frame.add(createCenterPanel(), BorderLayout.CENTER);
-        frame.add(createRightPanel(), BorderLayout.EAST);
-        frame.add(createBottomPanel(), BorderLayout.SOUTH);
+        JSplitPane leftCenterSplit = new JSplitPane(
+                JSplitPane.HORIZONTAL_SPLIT,
+                createLeftPanel(),
+                createCenterPanel()
+        );
 
-        frame.setLocationRelativeTo(null);
-        frame.setVisible(true);
+        leftCenterSplit.setResizeWeight(0.20);
+        leftCenterSplit.setDividerLocation(220);
+        leftCenterSplit.setOneTouchExpandable(true);
+
+        JSplitPane mainSplit = new JSplitPane(
+                JSplitPane.HORIZONTAL_SPLIT,
+                leftCenterSplit,
+                createRightPanel()
+        );
+
+        mainSplit.setResizeWeight(0.78);
+        mainSplit.setDividerLocation(850);
+        mainSplit.setOneTouchExpandable(true);
+
+        frame.add(mainSplit, BorderLayout.CENTER);
+        frame.add(createBottomPanel(), BorderLayout.SOUTH);
 
         ImagePlus.addImageListener(this);
 
@@ -125,12 +139,16 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         if (sourceImage != null) {
             imageToDisplay = sourceImage;
             updateStatus("Selected image: " + sourceImage.getTitle());
-            updateButtonState();
-            updateDisplayedImage(false);
+            updateDisplayedImage();
         } else {
             updateStatus("No Fiji image selected.");
-            updateButtonState();
         }
+
+        updateModelLabel();
+        updateButtonState();
+
+        frame.setLocationRelativeTo(null);
+        frame.setVisible(true);
     }
 
     private void loadConfiguration() {
@@ -158,28 +176,29 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
 
             pythonExe = properties.getProperty("python");
             scriptPath = properties.getProperty("script");
-            retrainScriptPath = properties.getProperty("retrain_script");
 
-            if (pythonExe == null || scriptPath == null) {
-                IJ.error(
-                        "Invalid configuration",
-                        "The configuration file must contain 'python' and 'script' paths."
-                );
+            if (pythonExe == null || pythonExe.trim().isEmpty()) {
+                IJ.error("Configuration error", "Missing property: python");
                 return;
             }
 
-            IJ.log("Loaded Python executable: " + pythonExe);
-            IJ.log("Loaded inference script: " + scriptPath);
-
-            if (retrainScriptPath != null) {
-                IJ.log("Loaded retraining script: " + retrainScriptPath);
-            } else {
-                IJ.log("Retraining script not configured yet.");
+            if (scriptPath == null || scriptPath.trim().isEmpty()) {
+                IJ.error("Configuration error", "Missing property: script");
+                return;
             }
+
+            logToConsole("Loaded Python executable: " + pythonExe);
+            logToConsole("Loaded inference script: " + scriptPath);
+
+            activeModelFile = getGlobalActiveModelOrBaseModel();
 
         } catch (Exception e) {
             IJ.handleException(e);
         }
+    }
+
+    private void logToConsole(String message) {
+        System.out.println("[Single Image Assistant] " + message);
     }
 
     private ImagePlus getCurrentOrFirstImage() {
@@ -206,41 +225,36 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
 
         sourceImage = image;
         imageToDisplay = sourceImage;
-        detectedImage = null;
 
         detections.clear();
-        roiListModel.clear();
-        selectedDetectionIndex = -1;
 
-        correctionMode = false;
-        addNeuronMode = false;
-
-        if (addNeuronButton != null) {
-            addNeuronButton.setText("2.2 Add neurons");
+        if (roiListModel != null) {
+            roiListModel.clear();
         }
 
         fitToPanel = true;
 
         updateStatus(message + ": " + sourceImage.getTitle());
         updateButtonState();
-        updateDisplayedImage(false);
+        updateDisplayedImage();
     }
 
     private JPanel createLeftPanel() {
-        JPanel panel = new JPanel(new BorderLayout());
-        panel.setPreferredSize(new Dimension(180, 0));
-        panel.setBorder(BorderFactory.createTitledBorder("ROI list"));
+        JPanel panel = new JPanel(new BorderLayout(4, 4));
+        panel.setPreferredSize(new Dimension(190, 0));
+        panel.setBorder(BorderFactory.createTitledBorder("Detections"));
 
         roiListModel = new DefaultListModel<>();
         roiList = new JList<>(roiListModel);
         roiList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        roiList.setVisibleRowCount(20);
 
         roiList.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting()) {
                 int index = roiList.getSelectedIndex();
 
                 if (index >= 0 && index < detections.size()) {
-                    selectedDetectionIndex = index;
+                    updateStatus("Selected detection: " + detections.get(index).name);
                 }
 
                 if (imagePanel != null) {
@@ -249,19 +263,14 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
             }
         });
 
-        roiList.getInputMap(JComponent.WHEN_FOCUSED).put(
-                KeyStroke.getKeyStroke("DELETE"),
-                "deleteSelectedDetection"
-        );
+        JScrollPane scrollPane = new JScrollPane(roiList);
+        panel.add(scrollPane, BorderLayout.CENTER);
 
-        roiList.getActionMap().put("deleteSelectedDetection", new AbstractAction() {
-            @Override
-            public void actionPerformed(java.awt.event.ActionEvent e) {
-                deleteSelectedDetection();
-            }
-        });
+        JLabel hintLabel = new JLabel("Click a detection or a neuron");
+        hintLabel.setFont(hintLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        hintLabel.setBorder(BorderFactory.createEmptyBorder(2, 4, 4, 4));
 
-        panel.add(new JScrollPane(roiList), BorderLayout.CENTER);
+        panel.add(hintLabel, BorderLayout.SOUTH);
 
         return panel;
     }
@@ -287,24 +296,24 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         zoomOutButton.addActionListener(e -> {
             fitToPanel = false;
             zoomFactor = Math.max(0.25, zoomFactor - 0.25);
-            updateDisplayedImage(true);
+            updateDisplayedImage();
         });
 
         zoomInButton.addActionListener(e -> {
             fitToPanel = false;
             zoomFactor = Math.min(5.0, zoomFactor + 0.25);
-            updateDisplayedImage(true);
+            updateDisplayedImage();
         });
 
         fitButton.addActionListener(e -> {
             fitToPanel = true;
-            updateDisplayedImage(true);
+            updateDisplayedImage();
         });
 
         actualSizeButton.addActionListener(e -> {
             fitToPanel = false;
             zoomFactor = 1.0;
-            updateDisplayedImage(true);
+            updateDisplayedImage();
         });
 
         zoomPanel.add(new JLabel("Zoom:"));
@@ -320,60 +329,96 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
     }
 
     private JPanel createRightPanel() {
-        JPanel panel = new JPanel();
-        panel.setPreferredSize(new Dimension(190, 0));
-        panel.setLayout(new GridLayout(7, 1, 8, 8));
-        panel.setBorder(BorderFactory.createTitledBorder("Actions"));
+        JPanel wrapper = new JPanel(new BorderLayout(6, 6));
+        wrapper.setPreferredSize(new Dimension(285, 0));
+        wrapper.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
 
-        importImageButton = new JButton("0. Import image");
-        detectButton = new JButton("1. Detect neurons");
-        correctButton = new JButton("2. Correct detections");
-        deleteSelectedButton = new JButton("2.1 Delete neuron");
-        addNeuronButton = new JButton("2.2 Add neurons");
-        saveButton = new JButton("2.3 Save corrections");
-        retrainButton = new JButton("3. Transfer learning");
+        JPanel contentPanel = new JPanel();
+        contentPanel.setLayout(new BoxLayout(contentPanel, BoxLayout.Y_AXIS));
 
-        correctButton.setEnabled(false);
-        saveButton.setEnabled(false);
-        retrainButton.setEnabled(false);
-        deleteSelectedButton.setEnabled(false);
-        addNeuronButton.setEnabled(false);
+        JPanel infoPanel = new JPanel(new BorderLayout(4, 4));
+        infoPanel.setBorder(BorderFactory.createTitledBorder("Mode"));
 
-        detectButton.addActionListener(e -> detectNeurons());
-        correctButton.addActionListener(e -> enableCorrectionMode());
-        saveButton.addActionListener(e -> saveCorrections());
-        retrainButton.addActionListener(e -> {
-            new NeuronTransferLearningWindowCommand().run();
-        });
-        deleteSelectedButton.addActionListener(e -> deleteSelectedDetection());
+        JLabel infoLabel = new JLabel(
+                "<html>" +
+                        "Detect neurons in the current image.<br><br>" +
+                        "Use <b>Transfer Learning</b> to process a full folder, " +
+                        "review corrections, save annotations and retrain the model." +
+                        "</html>"
+        );
 
-        addNeuronButton.addActionListener(e -> {
-            addNeuronMode = !addNeuronMode;
+        infoLabel.setFont(infoLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        infoLabel.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
 
-            if (addNeuronMode) {
-                addNeuronButton.setText("2.2 Stop adding neurons");
-                updateStatus("Add neuron mode enabled. Click and drag to add neurons. You can still delete the selected neuron.");
-            } else {
-                addNeuronButton.setText("2.2 Add neurons");
-                updateStatus("Add neuron mode disabled. You can select, move or delete neurons.");
-            }
+        openTransferLearningButton = new JButton("Open transfer learning");
+        styleActionButton(openTransferLearningButton, false);
+        openTransferLearningButton.addActionListener(e -> new NeuronTransferLearningWindowCommand().run());
 
-            updateButtonState();
+        infoPanel.add(infoLabel, BorderLayout.CENTER);
+        infoPanel.add(openTransferLearningButton, BorderLayout.SOUTH);
 
-            if (imagePanel != null) {
-                imagePanel.repaint();
-            }
-        });
+        JPanel modelPanel = new JPanel(new BorderLayout(4, 4));
+        modelPanel.setBorder(BorderFactory.createTitledBorder("Active model"));
+
+        modelLabel = new JTextField("No model selected");
+        modelLabel.setEditable(false);
+        modelLabel.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+        modelLabel.setToolTipText("Current model used for single image detection");
+        modelLabel.setHorizontalAlignment(JTextField.LEFT);
+
+        changeModelButton = new JButton("Change model");
+        styleActionButton(changeModelButton, false);
+        changeModelButton.addActionListener(e -> changeActiveModel());
+
+        modelPanel.add(modelLabel, BorderLayout.CENTER);
+        modelPanel.add(changeModelButton, BorderLayout.SOUTH);
+
+        JPanel actionsPanel = new JPanel();
+        actionsPanel.setLayout(new BoxLayout(actionsPanel, BoxLayout.Y_AXIS));
+        actionsPanel.setBorder(BorderFactory.createTitledBorder("Actions"));
+
+        importImageButton = new JButton("Import image");
+        detectButton = new JButton("Detect neurons");
+
+        styleActionButton(importImageButton, false);
+        styleActionButton(detectButton, true);
 
         importImageButton.addActionListener(e -> importImageFromFile());
+        detectButton.addActionListener(e -> detectNeurons());
 
-        panel.add(importImageButton);
-        panel.add(detectButton);
-        panel.add(correctButton);
-        panel.add(deleteSelectedButton);
-        panel.add(addNeuronButton);
-        panel.add(saveButton);
-        panel.add(retrainButton);
+        actionsPanel.add(importImageButton);
+        actionsPanel.add(Box.createVerticalStrut(8));
+        actionsPanel.add(detectButton);
+
+        contentPanel.add(infoPanel);
+        contentPanel.add(Box.createVerticalStrut(8));
+        contentPanel.add(modelPanel);
+        contentPanel.add(Box.createVerticalStrut(8));
+        contentPanel.add(actionsPanel);
+
+        wrapper.add(contentPanel, BorderLayout.NORTH);
+
+        return wrapper;
+    }
+
+    private void styleActionButton(JButton button, boolean primary) {
+        button.setAlignmentX(Component.CENTER_ALIGNMENT);
+        button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 34));
+        button.setFocusPainted(false);
+        button.setMargin(new Insets(6, 10, 6, 10));
+
+        if (primary) {
+            button.setFont(button.getFont().deriveFont(Font.BOLD));
+        }
+    }
+
+    private JPanel createBottomPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+
+        statusLabel = new JLabel("Ready.");
+        statusLabel.setBorder(BorderFactory.createEmptyBorder(6, 12, 6, 12));
+
+        panel.add(statusLabel, BorderLayout.WEST);
 
         return panel;
     }
@@ -398,84 +443,48 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
 
         ASSISTANT_IMPORTED_IMAGE_IDS.add(importedImage.getID());
 
-        importedImage.show();
         setSourceImage(importedImage, "Imported image");
     }
 
-    private JPanel createBottomPanel() {
-        JPanel panel = new JPanel(new BorderLayout());
-        statusLabel = new JLabel("Detected neurons: 0");
-        statusLabel.setBorder(BorderFactory.createEmptyBorder(6, 12, 6, 12));
-        panel.add(statusLabel, BorderLayout.WEST);
-        return panel;
-    }
-
     private void updateStatus(String message) {
-        currentMessage = message;
-
         int count = detections.size();
 
+        if (statusLabel == null) {
+            return;
+        }
+
         if (count > 0) {
-            statusLabel.setText("Neurons: " + count + " | " + currentMessage);
+            statusLabel.setText("Neurons: " + count + " | " + message);
         } else {
-            statusLabel.setText(currentMessage);
+            statusLabel.setText(message);
         }
     }
 
     private void updateButtonState() {
-        boolean hasDetections = !detections.isEmpty();
-        boolean busy = detectionRunning || retrainingRunning;
+        boolean hasImage = sourceImage != null;
+        boolean busy = detectionRunning;
 
         if (importImageButton != null) {
-            importImageButton.setEnabled(!busy && !correctionMode && !addNeuronMode);
+            importImageButton.setEnabled(!busy);
         }
 
-        detectButton.setEnabled(
-                sourceImage != null &&
-                        !hasDetections &&
-                        !correctionMode &&
-                        !addNeuronMode &&
-                        !busy
-        );
+        if (changeModelButton != null) {
+            changeModelButton.setEnabled(!busy);
+        }
 
-        correctButton.setEnabled(
-                hasDetections &&
-                        !correctionMode &&
-                        !addNeuronMode &&
-                        !busy
-        );
+        if (detectButton != null) {
+            detectButton.setEnabled(hasImage && !busy);
+        }
 
-        deleteSelectedButton.setEnabled(
-                correctionMode &&
-                        hasDetections &&
-                        !busy
-        );
-
-        addNeuronButton.setEnabled(
-                correctionMode &&
-                        !busy
-        );
-
-        saveButton.setEnabled(
-                correctionMode &&
-                        !addNeuronMode &&
-                        !busy
-        );
-
-        retrainButton.setEnabled(
-                !correctionMode &&
-                        hasDetections &&
-                        !busy
-        );
+        if (openTransferLearningButton != null) {
+            openTransferLearningButton.setEnabled(!busy);
+        }
     }
 
     private void detectNeurons() {
         if (pythonExe == null || scriptPath == null) {
-
             IJ.error("Plugin is not configured. Please run the installer first.");
-
             return;
-
         }
 
         ImagePlus currentImage = sourceImage;
@@ -493,46 +502,52 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
             return;
         }
 
+        File activeModel = getActiveModelFile();
+
+        if (activeModel == null || !activeModel.exists()) {
+            IJ.error("No active model found. Please select a valid model.");
+            return;
+        }
+
         sourceImage = currentImage;
-        final ImagePlus imageForDetection = currentImage;
-        IJ.log("Assistant selected source image: " + sourceImage.getTitle());
+        imageToDisplay = sourceImage;
 
         detectionRunning = true;
 
-        correctionMode = false;
-        addNeuronMode = false;
-        selectedDetectionIndex = -1;
-
-        detectButton.setEnabled(false);
-        correctButton.setEnabled(false);
-        saveButton.setEnabled(false);
-        retrainButton.setEnabled(false);
+        detections.clear();
+        roiListModel.clear();
 
         updateStatus("Detecting neurons... Please wait.");
         updateButtonState();
 
-        roiListModel.clear();
-        detections.clear();
+        if (imagePanel != null) {
+            imagePanel.repaint();
+        }
+
+        final ImagePlus imageForDetection = currentImage;
 
         new Thread(() -> {
             try {
-                DetectionResult result = runPythonDetection(imageForDetection);
-                detectedImage = result.image;
+                int detectedCount = runPythonDetection(imageForDetection);
 
                 loadDetectionsFromCsv();
 
-                imageToDisplay = detectedImage;
+                imageToDisplay = sourceImage;
                 fitToPanel = true;
-                updateDisplayedImage(true);
+                updateDisplayedImage();
 
                 SwingUtilities.invokeLater(() -> {
                     detectionRunning = false;
 
-                    updateStatus("Detection completed. Click 'Correct detections' to review the result.");
+                    updateStatus("Detection completed. Select a detection from the list or click a neuron.");
                     updateButtonState();
 
                     IJ.showStatus("Detected neurons: " + detections.size());
-                    IJ.log("Assistant detection completed. Count: " + detections.size());
+                    logToConsole("Assistant detection completed. Count: " + detections.size());
+
+                    if (detectedCount >= 0) {
+                        logToConsole("Python reported neuron count: " + detectedCount);
+                    }
                 });
 
             } catch (Exception e) {
@@ -540,7 +555,6 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
 
                 SwingUtilities.invokeLater(() -> {
                     detectionRunning = false;
-
                     updateStatus("Detection failed.");
                     updateButtonState();
                 });
@@ -548,7 +562,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         }).start();
     }
 
-    private DetectionResult runPythonDetection(ImagePlus imp) throws Exception {
+    private int runPythonDetection(ImagePlus imp) throws Exception {
         if (sessionDir == null) {
             sessionDir = new File(
                     System.getProperty("java.io.tmpdir"),
@@ -564,21 +578,19 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         File outputFile = new File(sessionDir, "imagej_output.png");
         File csvFile = new File(sessionDir, "imagej_output.csv");
 
+        deleteIfExists(inputFile);
         deleteIfExists(outputFile);
         deleteIfExists(csvFile);
 
         boolean saved = new FileSaver(imp).saveAsPng(inputFile.getAbsolutePath());
 
-        if (!saved) {
+        if (!saved || !inputFile.exists()) {
             throw new RuntimeException("Could not save the input image.");
-        }
-
-        if (pythonExe == null || scriptPath == null) {
-            throw new RuntimeException("Plugin is not configured. Please run the installer first.");
         }
 
         File pythonFile = new File(pythonExe);
         File scriptFile = new File(scriptPath);
+        File modelFile = getActiveModelFile();
 
         if (!pythonFile.exists()) {
             throw new RuntimeException("Python executable not found: " + pythonExe);
@@ -588,18 +600,24 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
             throw new RuntimeException("Inference script not found: " + scriptPath);
         }
 
+        if (modelFile == null || !modelFile.exists()) {
+            throw new RuntimeException("Active model not found.");
+        }
+
         ProcessBuilder pb = new ProcessBuilder(
                 pythonExe,
                 "-u",
                 scriptPath,
                 inputFile.getAbsolutePath(),
-                outputFile.getAbsolutePath()
+                outputFile.getAbsolutePath(),
+                modelFile.getAbsolutePath()
         );
 
         pb.redirectErrorStream(true);
 
-        IJ.log("Running Python inference from assistant window...");
-        IJ.log(String.join(" ", pb.command()));
+        logToConsole("Running Python inference from single image assistant...");
+        logToConsole("Active model: " + modelFile.getAbsolutePath());
+        logToConsole(String.join(" ", pb.command()));
 
         Process process = pb.start();
 
@@ -611,7 +629,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
             String line;
 
             while ((line = reader.readLine()) != null) {
-                IJ.log(line);
+                logToConsole(line);
 
                 if (line.startsWith("Detected neurons")) {
                     neuronCount = parseNeuronCount(line);
@@ -629,40 +647,11 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
             throw new RuntimeException("The output image was not created.");
         }
 
-        ImagePlus resultImage = IJ.openImage(outputFile.getAbsolutePath());
-
-        if (resultImage == null) {
-            throw new RuntimeException("The output image could not be opened.");
+        if (!csvFile.exists()) {
+            throw new RuntimeException("The detection CSV was not created.");
         }
 
-        return new DetectionResult(resultImage, neuronCount);
-    }
-
-    private void enableCorrectionMode() {
-        correctionMode = true;
-        addNeuronMode = false;
-        selectedDetectionIndex = -1;
-
-        addNeuronButton.setText("2.2 Add neurons");
-        roiList.clearSelection();
-
-        updateStatus("Correction mode enabled. Click a neuron to select it, drag to move it, delete it, or add a new one.");
-        updateButtonState();
-
-        if (imagePanel != null) {
-            imagePanel.repaint();
-        }
-
-        IJ.showMessage(
-                "Correction mode",
-                "Correction mode enabled.\n\n" +
-                        "- Click on a detected neuron to select it.\n" +
-                        "- Drag the selected neuron to move it.\n" +
-                        "- Click 'Delete selected neuron' to remove it.\n" +
-                        "- Click 'Add neuron mode' and draw as many missing neurons as needed.\n" +
-                        "- While adding neurons, right-click on a neuron to select it and delete it.\n" +
-                        "- When finished, click 'Save corrections'."
-        );
+        return neuronCount;
     }
 
     private void loadDetectionsFromCsv() throws Exception {
@@ -675,14 +664,14 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         detections.clear();
 
         try (BufferedReader br = new BufferedReader(new FileReader(csvFile))) {
-            String line = br.readLine(); // header
+            String line = br.readLine();
             int index = 1;
 
             while ((line = br.readLine()) != null) {
                 String[] parts = line.split(",");
 
                 if (parts.length < 3) {
-                    IJ.log("Skipping malformed CSV line: " + line);
+                    logToConsole("Skipping malformed CSV line: " + line);
                     continue;
                 }
 
@@ -691,25 +680,14 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
                 double radius = Double.parseDouble(parts[2]);
                 double diameter = radius * 2.0;
 
-                String maskPolygon = null;
-
-                if (parts.length >= 5) {
-                    maskPolygon = parts[4].replace("\"", "").trim();
-
-                    if (maskPolygon.isEmpty()) {
-                        maskPolygon = null;
-                    }
-                }
-
                 detections.add(new NeuronDetection(
                         "AUTO_" + index,
                         cx,
                         cy,
                         diameter,
-                        diameter,
-                        maskPolygon,
-                        false
+                        diameter
                 ));
+
                 index++;
             }
         }
@@ -720,168 +698,27 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
             for (NeuronDetection detection : detections) {
                 roiListModel.addElement(detection.name);
             }
+
+            if (!detections.isEmpty()) {
+                roiList.setSelectedIndex(0);
+                roiList.ensureIndexIsVisible(0);
+            }
+
+            if (imagePanel != null) {
+                imagePanel.repaint();
+            }
         });
     }
 
-    private File getTransferLearningRootDir() {
-        File root = new File(
-                System.getProperty("user.home"),
-                ".neuron-segmentation-assistant/transfer-learning-data"
-        );
-
-        File imagesTrain = new File(root, "images/train");
-        File labelsTrain = new File(root, "labels/train");
-
-        imagesTrain.mkdirs();
-        labelsTrain.mkdirs();
-
-        return root;
-    }
-
-    private String sanitizeFileName(String name) {
-        return name.replaceAll("[^a-zA-Z0-9._-]", "_");
-    }
-
-    private List<Double> ellipseToYoloPolygon(
-            NeuronDetection detection,
-            int imageWidth,
-            int imageHeight,
-            int points
-    ) {
-        List<Double> coords = new ArrayList<>();
-
-        double rx = detection.width / 2.0;
-        double ry = detection.height / 2.0;
-
-        for (int i = 0; i < points; i++) {
-            double angle = 2.0 * Math.PI * i / points;
-
-            double x = detection.cx + rx * Math.cos(angle);
-            double y = detection.cy + ry * Math.sin(angle);
-
-            x = clamp(x, 0, imageWidth - 1);
-            y = clamp(y, 0, imageHeight - 1);
-
-            coords.add(x / imageWidth);
-            coords.add(y / imageHeight);
-        }
-
-        return coords;
-    }
-
-    private List<Double> maskPolygonToNormalizedYolo(
-            String maskPolygon,
-            int imageWidth,
-            int imageHeight
-    ) {
-        List<Double> coords = new ArrayList<>();
-
-        if (maskPolygon == null || maskPolygon.trim().isEmpty()) {
-            return coords;
-        }
-
-        String[] values = maskPolygon.trim().split("\\s+");
-
-        for (int i = 0; i + 1 < values.length; i += 2) {
-            double x = Double.parseDouble(values[i]);
-            double y = Double.parseDouble(values[i + 1]);
-
-            x = clamp(x, 0, imageWidth - 1);
-            y = clamp(y, 0, imageHeight - 1);
-
-            coords.add(x / imageWidth);
-            coords.add(y / imageHeight);
-        }
-
-        return coords;
-    }
-
-    private List<Double> detectionToYoloPolygon(
-            NeuronDetection detection,
-            int imageWidth,
-            int imageHeight
-    ) {
-        boolean canUseOriginalMask =
-                !detection.edited &&
-                        detection.maskPolygon != null &&
-                        !detection.maskPolygon.trim().isEmpty();
-
-        if (canUseOriginalMask) {
-            try {
-                List<Double> maskCoords = maskPolygonToNormalizedYolo(
-                        detection.maskPolygon,
-                        imageWidth,
-                        imageHeight
-                );
-
-                // YOLO segmentation needs at least 3 points = 6 values.
-                if (maskCoords.size() >= 6) {
-                    return maskCoords;
-                }
-
-            } catch (Exception e) {
-                IJ.log("Could not use original mask polygon for " + detection.name + ". Falling back to ellipse.");
-            }
-        }
-
-        return ellipseToYoloPolygon(
-                detection,
-                imageWidth,
-                imageHeight,
-                32
-        );
-    }
-
-    private void writeYoloLabelFile(File labelFile, int imageWidth, int imageHeight) throws IOException {
-        try (PrintWriter writer = new PrintWriter(new FileWriter(labelFile))) {
-            for (NeuronDetection detection : detections) {
-                List<Double> polygon = detectionToYoloPolygon(
-                        detection,
-                        imageWidth,
-                        imageHeight
-                );
-
-                if (polygon.size() < 6) {
-                    IJ.log("Skipping invalid polygon for detection: " + detection.name);
-                    continue;
-                }
-
-                StringBuilder line = new StringBuilder();
-                line.append("0");
-
-                for (Double value : polygon) {
-                    line.append(" ");
-                    line.append(String.format(Locale.US, "%.6f", value));
-                }
-
-                writer.println(line);
-            }
-        }
-    }
-
-    private void writeDataYaml(File rootDir) throws IOException {
-        File yamlFile = new File(rootDir, "data.yaml");
-
-        try (PrintWriter writer = new PrintWriter(new FileWriter(yamlFile))) {
-            writer.println("path: " + rootDir.getAbsolutePath().replace("\\", "/"));
-            writer.println("train: images/train");
-            writer.println("val: images/train");
-            writer.println("names:");
-            writer.println("  0: neuron");
-        }
-    }
-
-    private void updateDisplayedImage(boolean flattenOverlay) {
+    private void updateDisplayedImage() {
         if (imageToDisplay == null) {
             return;
         }
 
-        ImagePlus displayImage = imageToDisplay;
+        Image awtImage = imageToDisplay.getImage();
 
-        Image awtImage = displayImage.getImage();
-
-        int originalWidth = displayImage.getWidth();
-        int originalHeight = displayImage.getHeight();
+        int originalWidth = imageToDisplay.getWidth();
+        int originalHeight = imageToDisplay.getHeight();
 
         BufferedImage bufferedImage = new BufferedImage(
                 originalWidth,
@@ -936,215 +773,131 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         });
     }
 
-    private void saveCorrections() {
-        if (sourceImage == null) {
-            IJ.error("No source image available.");
+    private File getActiveModelFile() {
+        if (activeModelFile != null && activeModelFile.exists()) {
+            return activeModelFile;
+        }
+
+        activeModelFile = getGlobalActiveModelOrBaseModel();
+        return activeModelFile;
+    }
+
+    private File getGlobalActiveModelOrBaseModel() {
+        File globalActive = new File(
+                System.getProperty("user.home"),
+                ".neuron-segmentation-assistant/active_model.txt"
+        );
+
+        if (globalActive.exists()) {
+            try {
+                String path = new String(Files.readAllBytes(globalActive.toPath())).trim();
+                File model = new File(path);
+
+                if (model.exists()) {
+                    return model;
+                }
+
+            } catch (Exception e) {
+                logToConsole("Could not read global active model. Falling back to base model.");
+            }
+        }
+
+        if (scriptPath == null || scriptPath.trim().isEmpty()) {
+            return null;
+        }
+
+        File scriptFile = new File(scriptPath);
+
+        if (!scriptFile.exists()) {
+            return null;
+        }
+
+        File pythonRoot = scriptFile.getParentFile();
+
+        if (pythonRoot == null) {
+            return null;
+        }
+
+        return new File(pythonRoot, "models/best.pt");
+    }
+
+    private void changeActiveModel() {
+        JFileChooser chooser = new JFileChooser();
+
+        File currentModel = getActiveModelFile();
+
+        if (currentModel != null && currentModel.getParentFile() != null) {
+            chooser.setCurrentDirectory(currentModel.getParentFile());
+        }
+
+        int result = chooser.showOpenDialog(frame);
+
+        if (result != JFileChooser.APPROVE_OPTION) {
             return;
         }
 
-        if (detections.isEmpty()) {
-            IJ.error("There are no detections to save.");
+        File selectedModel = chooser.getSelectedFile();
+
+        if (!selectedModel.exists() || !selectedModel.getName().endsWith(".pt")) {
+            IJ.error("Please select a valid .pt model file.");
             return;
         }
+
+        activeModelFile = selectedModel;
 
         try {
-            File rootDir = getTransferLearningRootDir();
-
-            File imagesTrainDir = new File(rootDir, "images/train");
-            File labelsTrainDir = new File(rootDir, "labels/train");
-
-            String baseName = sanitizeFileName(
-                    sourceImage.getTitle().replaceFirst("[.][^.]+$", "")
-            );
-
-            String uniqueName = baseName + "_" + sessionId.substring(0, 8);
-
-            File imageFile = new File(imagesTrainDir, uniqueName + ".png");
-            File labelFile = new File(labelsTrainDir, uniqueName + ".txt");
-
-            boolean savedImage = new FileSaver(sourceImage).saveAsPng(imageFile.getAbsolutePath());
-
-            if (!savedImage) {
-                throw new RuntimeException("Could not save corrected training image.");
-            }
-
-            writeYoloLabelFile(
-                    labelFile,
-                    sourceImage.getWidth(),
-                    sourceImage.getHeight()
-            );
-
-            writeDataYaml(rootDir);
-
-            correctionMode = false;
-            addNeuronMode = false;
-            selectedDetectionIndex = -1;
-
-            addNeuronButton.setText("2.2 Add neurons");
-            roiList.clearSelection();
-
-            updateStatus("Corrections saved for transfer learning.");
-            updateButtonState();
-
-            if (imagePanel != null) {
-                imagePanel.repaint();
-            }
-
-            IJ.log("Transfer learning image saved to: " + imageFile.getAbsolutePath());
-            IJ.log("Transfer learning label saved to: " + labelFile.getAbsolutePath());
-            IJ.log("Transfer learning data.yaml saved to: " + new File(rootDir, "data.yaml").getAbsolutePath());
-
-            IJ.showMessage(
-                    "Save corrections",
-                    "Corrections saved for transfer learning.\n\n" +
-                            "Image:\n" + imageFile.getAbsolutePath() + "\n\n" +
-                            "Label:\n" + labelFile.getAbsolutePath()
-            );
+            writeGlobalActiveModel(selectedModel);
+            updateModelLabel();
+            updateStatus("Active model changed: " + selectedModel.getName());
 
         } catch (Exception e) {
             IJ.handleException(e);
-            updateStatus("Could not save corrections.");
-            updateButtonState();
+            updateStatus("Could not change active model.");
         }
     }
 
-    private void retrainModel() {
-        if (pythonExe == null || retrainScriptPath == null) {
-            IJ.error(
-                    "Retraining not configured",
-                    "The retraining script is not configured.\n\n" +
-                            "Please run the installer again or check config.properties."
-            );
-            return;
+    private void writeGlobalActiveModel(File modelFile) throws IOException {
+        File activeFile = new File(
+                System.getProperty("user.home"),
+                ".neuron-segmentation-assistant/active_model.txt"
+        );
+
+        activeFile.getParentFile().mkdirs();
+
+        try (PrintWriter writer = new PrintWriter(new FileWriter(activeFile))) {
+            writer.println(modelFile.getAbsolutePath());
         }
-
-        File pythonFile = new File(pythonExe);
-        File retrainScriptFile = new File(retrainScriptPath);
-
-        if (!pythonFile.exists()) {
-            IJ.error("Python executable not found:\n" + pythonExe);
-            return;
-        }
-
-        if (!retrainScriptFile.exists()) {
-            IJ.error("Retraining script not found:\n" + retrainScriptPath);
-            return;
-        }
-
-        retrainingRunning = true;
-        updateStatus("Retraining model... This may take several minutes. Please wait.");
-        updateButtonState();
-
-        new Thread(() -> {
-            try {
-                File rootDir = getTransferLearningRootDir();
-                File dataYaml = new File(rootDir, "data.yaml");
-
-                if (!dataYaml.exists()) {
-                    throw new RuntimeException(
-                            "Transfer learning data.yaml not found. Please save corrections before retraining."
-                    );
-                }
-
-                ProcessBuilder pb = new ProcessBuilder(
-                        pythonExe,
-                        "-u",
-                        retrainScriptPath,
-                        dataYaml.getAbsolutePath()
-                );
-
-                pb.redirectErrorStream(true);
-
-                IJ.log("Running model retraining...");
-                IJ.log(String.join(" ", pb.command()));
-
-                Process process = pb.start();
-
-                try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(process.getInputStream()))) {
-
-                    String line;
-
-                    while ((line = reader.readLine()) != null) {
-                        IJ.log(line);
-                    }
-                }
-
-                int exitCode = process.waitFor();
-
-                if (exitCode != 0) {
-                    throw new RuntimeException("Retraining failed with exit code " + exitCode);
-                }
-
-                SwingUtilities.invokeLater(() -> {
-                    retrainingRunning = false;
-                    updateStatus("Retraining completed successfully.");
-                    updateButtonState();
-
-                    IJ.showMessage(
-                            "Retraining completed",
-                            "The model was retrained successfully.\n\n" +
-                                    "The adapted model has been generated and will be used in future detections."
-                    );
-                });
-
-            } catch (Exception e) {
-                IJ.handleException(e);
-
-                SwingUtilities.invokeLater(() -> {
-                    retrainingRunning = false;
-                    updateStatus("Retraining failed.");
-                    updateButtonState();
-                });
-            }
-        }).start();
     }
 
-    private void deleteSelectedDetection() {
-        int selectedIndex = selectedDetectionIndex;
-
-        if (selectedIndex < 0 || selectedIndex >= detections.size()) {
-            selectedIndex = roiList.getSelectedIndex();
+    private String shortenTextMiddle(String text, int maxLength) {
+        if (text == null || text.length() <= maxLength) {
+            return text;
         }
 
-        if (selectedIndex < 0 || selectedIndex >= detections.size()) {
-            IJ.showMessage(
-                    "Delete neuron",
-                    "Please select a neuron first by clicking on the image or selecting it from the ROI list."
-            );
+        int keepStart = Math.max(4, maxLength / 2 - 2);
+        int keepEnd = Math.max(4, maxLength - keepStart - 3);
+
+        return text.substring(0, keepStart) + "..." + text.substring(text.length() - keepEnd);
+    }
+
+    private void updateModelLabel() {
+        if (modelLabel == null) {
             return;
         }
 
-        detections.remove(selectedIndex);
+        File model = getActiveModelFile();
 
-        selectedDetectionIndex = -1;
-        roiList.clearSelection();
+        if (model != null && model.exists()) {
+            String name = model.getName();
 
-        refreshAfterEditing();
+            modelLabel.setText(name);
+            modelLabel.setCaretPosition(0);
+            modelLabel.setToolTipText(model.getAbsolutePath());
 
-        updateStatus("Deleted selected neuron.");
-        updateButtonState();
-    }
-
-    private void refreshAfterEditing() {
-        roiListModel.clear();
-
-        for (NeuronDetection detection : detections) {
-            roiListModel.addElement(detection.name);
-        }
-
-        if (selectedDetectionIndex >= 0 && selectedDetectionIndex < detections.size()) {
-            roiList.setSelectedIndex(selectedDetectionIndex);
-            roiList.ensureIndexIsVisible(selectedDetectionIndex);
         } else {
-            roiList.clearSelection();
+            modelLabel.setText("No model selected");
+            modelLabel.setToolTipText(null);
         }
-
-        if (imagePanel != null) {
-            imagePanel.repaint();
-        }
-
-        updateButtonState();
     }
 
     private int parseNeuronCount(String line) {
@@ -1156,7 +909,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
             }
 
         } catch (Exception e) {
-            IJ.log("Could not parse neuron count from line: " + line);
+            logToConsole("Could not parse neuron count from line: " + line);
         }
 
         return -1;
@@ -1164,7 +917,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
 
     private void deleteIfExists(File file) {
         if (file.exists() && !file.delete()) {
-            IJ.log("Warning: previous file could not be deleted: " + file.getAbsolutePath());
+            logToConsole("Warning: previous file could not be deleted: " + file.getAbsolutePath());
         }
     }
 
@@ -1179,18 +932,16 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
             for (File file : files) {
                 if (file.isDirectory()) {
                     deleteDirectory(file);
-                } else {
-                    if (!file.delete()) {
-                        IJ.log("Warning: could not delete temp file: " + file.getAbsolutePath());
-                    }
+                } else if (!file.delete()) {
+                    logToConsole("Warning: could not delete temp file: " + file.getAbsolutePath());
                 }
             }
         }
 
         if (!directory.delete()) {
-            IJ.log("Warning: could not delete temp directory: " + directory.getAbsolutePath());
+            logToConsole("Warning: could not delete temp directory: " + directory.getAbsolutePath());
         } else {
-            IJ.log("Temporary session directory deleted: " + directory.getAbsolutePath());
+            logToConsole("Temporary session directory deleted: " + directory.getAbsolutePath());
         }
     }
 
@@ -1201,19 +952,10 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
                 return;
             }
 
-            // If the image was imported from one assistant window,
-            // other assistant windows should not auto-load it.
             if (ASSISTANT_IMPORTED_IMAGE_IDS.contains(imp.getID())) {
                 return;
             }
 
-            // Do not change the image while the user is editing corrections.
-            if (correctionMode || addNeuronMode) {
-                return;
-            }
-
-            // If this assistant window already has an image assigned,
-            // do not replace it automatically.
             if (sourceImage != null) {
                 return;
             }
@@ -1232,11 +974,12 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
             if (imp != null && imp == sourceImage) {
                 sourceImage = null;
                 imageToDisplay = null;
-                detectedImage = null;
 
                 detections.clear();
-                roiListModel.clear();
-                selectedDetectionIndex = -1;
+
+                if (roiListModel != null) {
+                    roiListModel.clear();
+                }
 
                 updateStatus("Selected image was closed.");
                 updateButtonState();
@@ -1254,83 +997,26 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         // Not needed for now.
     }
 
-    private static class DetectionResult {
-        private final ImagePlus image;
-        private final int count;
-
-        private DetectionResult(ImagePlus image, int count) {
-            this.image = image;
-            this.count = count;
-        }
-    }
-
     private static class NeuronDetection {
-        private String name;
-        private double cx;
-        private double cy;
-        private double width;
-        private double height;
-
-        // Original YOLO mask polygon, exported by infer_one.py.
-        // Stored in absolute image coordinates: x1 y1 x2 y2 ...
-        private String maskPolygon;
-
-        // True when the user moves, edits or creates the detection manually.
-        // If true, the detection is exported as an ellipse polygon.
-        private boolean edited;
-
-        private NeuronDetection(String name, double cx, double cy, double width, double height) {
-            this(name, cx, cy, width, height, null, false);
-        }
+        private final String name;
+        private final double cx;
+        private final double cy;
+        private final double width;
+        private final double height;
 
         private NeuronDetection(
                 String name,
                 double cx,
                 double cy,
                 double width,
-                double height,
-                String maskPolygon,
-                boolean edited
+                double height
         ) {
             this.name = name;
             this.cx = cx;
             this.cy = cy;
             this.width = width;
             this.height = height;
-            this.maskPolygon = maskPolygon;
-            this.edited = edited;
         }
-    }
-
-    private double clamp(double value, double min, double max) {
-        return Math.max(min, Math.min(max, value));
-    }
-
-    private void addManualDetection(double cx, double cy, double width, double height) {
-        int manualIndex = 1;
-
-        for (NeuronDetection detection : detections) {
-            if (detection.name.startsWith("MANUAL_")) {
-                manualIndex++;
-            }
-        }
-
-        detections.add(new NeuronDetection(
-                "MANUAL_" + manualIndex,
-                cx,
-                cy,
-                width,
-                height,
-                null,
-                true
-        ));
-
-        selectedDetectionIndex = detections.size() - 1;
-
-        refreshAfterEditing();
-
-        updateStatus("Manual neuron added. Keep drawing or click 'Stop adding neurons' to finish.");
-        updateButtonState();
     }
 
     private class ImagePanel extends JPanel {
@@ -1342,25 +1028,14 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         private int offsetX;
         private int offsetY;
 
-        private boolean drawing = false;
-        private int dragStartX;
-        private int dragStartY;
-        private int dragCurrentX;
-        private int dragCurrentY;
-
-        private boolean movingSelected = false;
-        private double lastMoveImageX;
-        private double lastMoveImageY;
-
         private ImagePanel() {
             setPreferredSize(new Dimension(640, 480));
             setBackground(Color.DARK_GRAY);
 
             java.awt.event.MouseAdapter mouseAdapter = new java.awt.event.MouseAdapter() {
-
                 @Override
                 public void mousePressed(java.awt.event.MouseEvent e) {
-                    if (imageToDisplay == null) {
+                    if (image == null || detections.isEmpty()) {
                         return;
                     }
 
@@ -1371,131 +1046,22 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
                     double imageX = screenToImageX(e.getX());
                     double imageY = screenToImageY(e.getY());
 
-                    if (!correctionMode && !addNeuronMode) {
-                        return;
-                    }
-
-                    if (addNeuronMode) {
-                        int clickedIndex = findDetectionAt(imageX, imageY);
-
-                        if (clickedIndex >= 0) {
-                            selectedDetectionIndex = clickedIndex;
-
-                            roiList.setSelectedIndex(clickedIndex);
-                            roiList.ensureIndexIsVisible(clickedIndex);
-
-                            NeuronDetection selected = detections.get(clickedIndex);
-                            updateStatus("Selected " + selected.name + ". Click 'Delete selected neuron' to remove it, or drag empty space to add another.");
-
-                            repaint();
-                            return;
-                        }
-
-                        selectedDetectionIndex = -1;
-                        roiList.clearSelection();
-
-                        drawing = true;
-                        dragStartX = e.getX();
-                        dragStartY = e.getY();
-                        dragCurrentX = e.getX();
-                        dragCurrentY = e.getY();
-
-                        updateStatus("Drawing new neuron...");
-                        repaint();
-                        return;
-                    }
-
                     int clickedIndex = findDetectionAt(imageX, imageY);
 
                     if (clickedIndex >= 0) {
-                        selectedDetectionIndex = clickedIndex;
-
                         roiList.setSelectedIndex(clickedIndex);
                         roiList.ensureIndexIsVisible(clickedIndex);
-
-                        NeuronDetection selected = detections.get(clickedIndex);
-
-                        movingSelected = true;
-                        lastMoveImageX = imageX;
-                        lastMoveImageY = imageY;
-
-                        updateStatus("Selected " + selected.name + ". Drag to move or click Delete selected ROI.");
-
-                        repaint();
+                        updateStatus("Selected detection: " + detections.get(clickedIndex).name);
                     } else {
-                        selectedDetectionIndex = -1;
                         roiList.clearSelection();
-                        updateStatus("No ROI selected.");
-                        repaint();
-                    }
-                }
-
-                @Override
-                public void mouseDragged(java.awt.event.MouseEvent e) {
-                    if (drawing) {
-                        dragCurrentX = e.getX();
-                        dragCurrentY = e.getY();
-                        repaint();
-                        return;
+                        updateStatus("No detection selected.");
                     }
 
-                    if (movingSelected) {
-                        int selectedIndex = selectedDetectionIndex;
-
-                        if (selectedIndex < 0 || selectedIndex >= detections.size()) {
-                            selectedIndex = roiList.getSelectedIndex();
-                        }
-
-                        if (selectedIndex < 0 || selectedIndex >= detections.size()) {
-                            return;
-                        }
-
-                        selectedDetectionIndex = selectedIndex;
-                        roiList.ensureIndexIsVisible(selectedIndex);
-
-                        double imageX = screenToImageX(e.getX());
-                        double imageY = screenToImageY(e.getY());
-
-                        NeuronDetection selected = detections.get(selectedIndex);
-
-                        double dx = imageX - lastMoveImageX;
-                        double dy = imageY - lastMoveImageY;
-
-                        selected.cx = clamp(selected.cx + dx, 0, imageToDisplay.getWidth() - 1);
-                        selected.cy = clamp(selected.cy + dy, 0, imageToDisplay.getHeight() - 1);
-                        selected.edited = true;
-
-                        lastMoveImageX = imageX;
-                        lastMoveImageY = imageY;
-
-                        repaint();
-                    }
-                }
-
-                @Override
-                public void mouseReleased(java.awt.event.MouseEvent e) {
-                    if (drawing) {
-                        drawing = false;
-
-                        dragCurrentX = e.getX();
-                        dragCurrentY = e.getY();
-
-                        addManualDetectionFromDrag();
-
-                        repaint();
-                        return;
-                    }
-
-                    if (movingSelected) {
-                        movingSelected = false;
-                        updateStatus("Corrected neurons: " + detections.size());
-                        repaint();
-                    }
+                    repaint();
                 }
             };
 
             addMouseListener(mouseAdapter);
-            addMouseMotionListener(mouseAdapter);
         }
 
         private void setImage(Image image, int width, int height) {
@@ -1537,42 +1103,16 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
             return normalizedX * normalizedX + normalizedY * normalizedY <= 1.0;
         }
 
-        private void addManualDetectionFromDrag() {
-            if (imageToDisplay == null) {
-                return;
+        private int findDetectionAt(double imageX, double imageY) {
+            for (int i = detections.size() - 1; i >= 0; i--) {
+                NeuronDetection detection = detections.get(i);
+
+                if (isPointInsideDetection(imageX, imageY, detection)) {
+                    return i;
+                }
             }
 
-            int x1Screen = Math.min(dragStartX, dragCurrentX);
-            int y1Screen = Math.min(dragStartY, dragCurrentY);
-            int x2Screen = Math.max(dragStartX, dragCurrentX);
-            int y2Screen = Math.max(dragStartY, dragCurrentY);
-
-            int widthScreen = x2Screen - x1Screen;
-            int heightScreen = y2Screen - y1Screen;
-
-            if (widthScreen < 4 || heightScreen < 4) {
-                updateStatus("ROI too small. Drag a larger region.");
-                return;
-            }
-
-            double x1Image = screenToImageX(x1Screen);
-            double y1Image = screenToImageY(y1Screen);
-            double x2Image = screenToImageX(x2Screen);
-            double y2Image = screenToImageY(y2Screen);
-
-            x1Image = clamp(x1Image, 0, imageToDisplay.getWidth() - 1);
-            y1Image = clamp(y1Image, 0, imageToDisplay.getHeight() - 1);
-            x2Image = clamp(x2Image, 0, imageToDisplay.getWidth() - 1);
-            y2Image = clamp(y2Image, 0, imageToDisplay.getHeight() - 1);
-
-            double cx = (x1Image + x2Image) / 2.0;
-            double cy = (y1Image + y2Image) / 2.0;
-
-            double width = Math.abs(x2Image - x1Image);
-            double height = Math.abs(y2Image - y1Image);
-
-            addManualDetection(cx, cy, width, height);
-
+            return -1;
         }
 
         @Override
@@ -1591,63 +1131,55 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
             g.drawImage(image, offsetX, offsetY, imageWidth, imageHeight, this);
 
             drawDetections((Graphics2D) g);
-
-            if (drawing) {
-                drawTemporaryRoi((Graphics2D) g);
-            }
         }
 
         private void drawDetections(Graphics2D g2) {
-            int selectedIndex = selectedDetectionIndex;
+            g2.setRenderingHint(
+                    RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON
+            );
+
+            int selectedIndex = roiList != null ? roiList.getSelectedIndex() : -1;
 
             for (int i = 0; i < detections.size(); i++) {
                 NeuronDetection detection = detections.get(i);
-
-                Color roiColor;
-
-                if (i == selectedIndex) {
-                    roiColor = Color.ORANGE;
-                } else if (detection.name.startsWith("MANUAL_")) {
-                    roiColor = Color.GREEN;
-                } else {
-                    roiColor = Color.BLUE;
-                }
 
                 int x = (int) Math.round(offsetX + (detection.cx - detection.width / 2.0) * zoomFactor);
                 int y = (int) Math.round(offsetY + (detection.cy - detection.height / 2.0) * zoomFactor);
                 int w = (int) Math.round(detection.width * zoomFactor);
                 int h = (int) Math.round(detection.height * zoomFactor);
 
-                g2.setColor(roiColor);
-                g2.setStroke(new BasicStroke(i == selectedIndex ? 2.5f : 1.5f));
+                boolean selected = i == selectedIndex;
+
+                Stroke colorStroke;
+                Stroke shadowStroke;
+                Color roiColor;
+
+                if (selected) {
+                    roiColor = COLOR_SELECTED;
+                    colorStroke = new BasicStroke(3.2f);
+                    shadowStroke = new BasicStroke(4.6f);
+                } else {
+                    roiColor = COLOR_AUTOMATIC;
+                    colorStroke = new BasicStroke(2.0f);
+                    shadowStroke = new BasicStroke(3.2f);
+                }
+
+                g2.setColor(COLOR_OUTLINE_SHADOW);
+                g2.setStroke(shadowStroke);
                 g2.drawOval(x, y, w, h);
 
-            }
-        }
+                g2.setColor(roiColor);
+                g2.setStroke(colorStroke);
+                g2.drawOval(x, y, w, h);
 
-        private void drawTemporaryRoi(Graphics2D g2) {
-            g2.setColor(Color.GREEN);
-            g2.setStroke(new BasicStroke(2.0f));
+                if (selected) {
+                    int centerX = (int) Math.round(offsetX + detection.cx * zoomFactor);
+                    int centerY = (int) Math.round(offsetY + detection.cy * zoomFactor);
 
-            int x = Math.min(dragStartX, dragCurrentX);
-            int y = Math.min(dragStartY, dragCurrentY);
-            int w = Math.abs(dragCurrentX - dragStartX);
-            int h = Math.abs(dragCurrentY - dragStartY);
-
-            g2.drawOval(x, y, w, h);
-
-        }
-
-        private int findDetectionAt(double imageX, double imageY) {
-            for (int i = detections.size() - 1; i >= 0; i--) {
-                NeuronDetection detection = detections.get(i);
-
-                if (isPointInsideDetection(imageX, imageY, detection)) {
-                    return i;
+                    g2.setColor(COLOR_SELECTED);
                 }
             }
-
-            return -1;
         }
     }
 }

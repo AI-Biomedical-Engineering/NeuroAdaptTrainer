@@ -19,6 +19,8 @@ import java.util.List;
 import java.util.Properties;
 import java.util.Locale;
 import java.util.UUID;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 
 @Plugin(type = Command.class, menuPath = "Plugins>Neuron Segmentation>Transfer Learning Assistant")
 public class NeuronTransferLearningWindowCommand implements Command {
@@ -37,10 +39,12 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
     private JLabel statusLabel;
     private JLabel folderLabel;
-    private JLabel modelLabel;
+    private JTextField modelLabel;
     private JLabel zoomLabel;
 
     private JTextArea logTextArea;
+    private File logFile;
+    private PrintWriter logWriter;
 
     private JScrollPane imageScrollPane;
     private ImagePanel imagePanel;
@@ -50,9 +54,11 @@ public class NeuronTransferLearningWindowCommand implements Command {
     private JButton correctButton;
     private JButton deleteSelectedButton;
     private JButton addNeuronButton;
+    private JButton undoButton;
     private JButton saveToTrainingSetButton;
     private JButton retrainButton;
     private JButton changeModelButton;
+    private JCheckBox useHardwareAccelerationCheckBox;
     private JButton zoomInButton;
     private JButton zoomOutButton;
     private JButton fitButton;
@@ -72,11 +78,13 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
     private final List<NeuronDetection> detections = new ArrayList<>();
     private final List<Integer> selectedDetectionIndices = new ArrayList<>();
+    private List<NeuronDetection> undoState = null;
 
     private boolean correctionMode = false;
     private boolean addNeuronMode = false;
     private boolean detectionRunning = false;
     private boolean retrainingRunning = false;
+    private boolean useHardwareAccelerationForRetraining = false;
 
     private double zoomFactor = 1.0;
     private boolean fitToPanel = true;
@@ -91,6 +99,10 @@ public class NeuronTransferLearningWindowCommand implements Command {
     private static final Color COLOR_LASSO = new Color(255, 140, 0);          // lasso selection
     private static final Color COLOR_TEMPORARY = new Color(0, 220, 160);      // ROI being drawn
     private static final Color COLOR_OUTLINE_SHADOW = new Color(0, 0, 0, 100);
+
+    private static final String CONFIG_DIR_NAME = ".neuron-segmentation-assistant";
+    private static final String CONFIG_FILE_NAME = "config.properties";
+    private static final String CONFIG_USE_HARDWARE_ACCELERATION = "use_hardware_acceleration";
 
     @Override
     public void run() {
@@ -149,9 +161,13 @@ public class NeuronTransferLearningWindowCommand implements Command {
         frame.addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
             public void windowClosed(java.awt.event.WindowEvent e) {
+                appendLog("Closing transfer learning assistant.");
+
                 if (sessionDir != null) {
                     deleteDirectory(sessionDir);
                 }
+
+                closeLogFile();
             }
         });
 
@@ -244,56 +260,108 @@ public class NeuronTransferLearningWindowCommand implements Command {
     }
 
     private JPanel createRightPanel() {
-        JPanel wrapper = new JPanel(new BorderLayout());
-        wrapper.setPreferredSize(new Dimension(230, 0));
+        JPanel wrapper = new JPanel(new BorderLayout(6, 6));
+        wrapper.setPreferredSize(new Dimension(285, 0));
+        wrapper.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+
+        JPanel topPanel = new JPanel();
+        topPanel.setLayout(new BoxLayout(topPanel, BoxLayout.Y_AXIS));
+
+        JPanel infoPanel = new JPanel(new BorderLayout(4, 4));
+        infoPanel.setBorder(BorderFactory.createTitledBorder("Mode"));
+
+        JLabel infoLabel = new JLabel(
+                "<html>" +
+                        "Process a full image folder.<br><br>" +
+                        "Detect neurons, review corrections, save annotations " +
+                        "and retrain the active model." +
+                        "</html>"
+        );
+
+        infoLabel.setFont(infoLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        infoLabel.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+
+        infoPanel.add(infoLabel, BorderLayout.CENTER);
+
+        JPanel modelPanel = new JPanel(new BorderLayout(4, 4));
+        modelPanel.setBorder(BorderFactory.createTitledBorder("Active model"));
+
+        modelLabel = new JTextField("No model selected");
+        modelLabel.setEditable(false);
+        modelLabel.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+        modelLabel.setToolTipText("Current model used for folder detection and retraining");
+        modelLabel.setHorizontalAlignment(JTextField.LEFT);
+
+        changeModelButton = new JButton("Change model");
+        styleActionButton(changeModelButton, false);
+        changeModelButton.addActionListener(e -> changeActiveModel());
+
+        useHardwareAccelerationCheckBox = new JCheckBox("Use hardware acceleration");
+        useHardwareAccelerationCheckBox.setSelected(useHardwareAccelerationForRetraining);
+        useHardwareAccelerationCheckBox.setFont(useHardwareAccelerationCheckBox.getFont().deriveFont(Font.PLAIN, 11f));
+        useHardwareAccelerationCheckBox.setToolTipText(
+                "If enabled, retraining will request the best available hardware acceleration."
+        );
+
+        useHardwareAccelerationCheckBox.addActionListener(e -> {
+            saveHardwareAccelerationPreference(useHardwareAccelerationCheckBox.isSelected());
+
+            if (useHardwareAccelerationCheckBox.isSelected()) {
+                updateStatus("Hardware acceleration enabled for retraining.");
+            } else {
+                updateStatus("CPU retraining selected.");
+            }
+        });
+
+        JPanel modelBottomPanel = new JPanel();
+        modelBottomPanel.setLayout(new BoxLayout(modelBottomPanel, BoxLayout.Y_AXIS));
+
+        changeModelButton.setAlignmentX(Component.CENTER_ALIGNMENT);
+        useHardwareAccelerationCheckBox.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        modelBottomPanel.add(changeModelButton);
+        modelBottomPanel.add(Box.createVerticalStrut(4));
+        modelBottomPanel.add(useHardwareAccelerationCheckBox);
+
+        modelPanel.add(modelLabel, BorderLayout.CENTER);
+        modelPanel.add(modelBottomPanel, BorderLayout.SOUTH);
 
         JPanel actionsPanel = new JPanel();
-        actionsPanel.setLayout(new GridLayout(8, 1, 8, 8));
+        actionsPanel.setLayout(new GridLayout(5, 1, 8, 8));
         actionsPanel.setBorder(BorderFactory.createTitledBorder("Actions"));
 
         selectFolderButton = new JButton("1. Select folder");
         detectImagesButton = new JButton("2. Detect images");
         correctButton = new JButton("3. Correct image");
-        deleteSelectedButton = new JButton("3.1 Delete neuron");
-        addNeuronButton = new JButton("3.2 Add neurons");
-        saveToTrainingSetButton = new JButton("4. Save to training set");
+        saveToTrainingSetButton = new JButton("4. Save corrections");
         retrainButton = new JButton("5. Retrain model");
-        changeModelButton = new JButton("Change model");
+
+        styleActionButton(selectFolderButton, false);
+        styleActionButton(detectImagesButton, false);
+        styleActionButton(correctButton, false);
+        styleActionButton(saveToTrainingSetButton, false);
+        styleActionButton(retrainButton, true);
 
         selectFolderButton.addActionListener(e -> selectFolder());
         detectImagesButton.addActionListener(e -> detectImages());
         correctButton.addActionListener(e -> enableCorrectionMode());
-        deleteSelectedButton.addActionListener(e -> deleteSelectedDetection());
         saveToTrainingSetButton.addActionListener(e -> saveToTrainingSet());
         retrainButton.addActionListener(e -> retrainModel());
-        changeModelButton.addActionListener(e -> changeActiveModel());
-
-        addNeuronButton.addActionListener(e -> {
-            addNeuronMode = !addNeuronMode;
-
-            if (addNeuronMode) {
-                addNeuronButton.setText("3.2 Stop adding");
-                updateStatus("Add neuron mode enabled. Click and drag to add missing neurons.");
-            } else {
-                addNeuronButton.setText("3.2 Add neurons");
-                updateStatus("Add neuron mode disabled.");
-            }
-
-            updateButtonState();
-            imagePanel.repaint();
-        });
 
         actionsPanel.add(selectFolderButton);
         actionsPanel.add(detectImagesButton);
         actionsPanel.add(correctButton);
-        actionsPanel.add(deleteSelectedButton);
-        actionsPanel.add(addNeuronButton);
         actionsPanel.add(saveToTrainingSetButton);
         actionsPanel.add(retrainButton);
-        actionsPanel.add(changeModelButton);
 
-        JPanel roiPanel = new JPanel(new BorderLayout());
-        roiPanel.setBorder(BorderFactory.createTitledBorder("ROI list"));
+        topPanel.add(infoPanel);
+        topPanel.add(Box.createVerticalStrut(8));
+        topPanel.add(modelPanel);
+        topPanel.add(Box.createVerticalStrut(8));
+        topPanel.add(actionsPanel);
+
+        JPanel neuronPanel = new JPanel(new BorderLayout());
+        neuronPanel.setBorder(BorderFactory.createTitledBorder("Neuron list"));
 
         roiListModel = new DefaultListModel<>();
         roiList = new JList<>(roiListModel);
@@ -317,19 +385,93 @@ public class NeuronTransferLearningWindowCommand implements Command {
             }
         });
 
-        roiPanel.add(new JScrollPane(roiList), BorderLayout.CENTER);
+        deleteSelectedButton = new JButton("Delete");
+        addNeuronButton = new JButton("Add");
+        undoButton = new JButton("↶ Undo");
 
-        JPanel modelPanel = new JPanel(new BorderLayout());
-        modelPanel.setBorder(BorderFactory.createTitledBorder("Model"));
-        modelLabel = new JLabel("Base model");
-        modelLabel.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
-        modelPanel.add(modelLabel, BorderLayout.CENTER);
+        styleActionButton(deleteSelectedButton, false);
+        styleActionButton(addNeuronButton, false);
+        styleActionButton(undoButton, false);
 
-        wrapper.add(actionsPanel, BorderLayout.NORTH);
-        wrapper.add(roiPanel, BorderLayout.CENTER);
-        wrapper.add(modelPanel, BorderLayout.SOUTH);
+        deleteSelectedButton.addActionListener(e -> deleteSelectedDetection());
+        undoButton.addActionListener(e -> undoLastChange());
+
+        addNeuronButton.addActionListener(e -> {
+            addNeuronMode = !addNeuronMode;
+
+            if (addNeuronMode) {
+                addNeuronButton.setText("Stop add");
+                updateStatus("Add neuron mode enabled. Click and drag to add missing neurons.");
+            } else {
+                addNeuronButton.setText("Add");
+                updateStatus("Add neuron mode disabled.");
+            }
+
+            updateButtonState();
+            imagePanel.repaint();
+        });
+
+        JPanel neuronActionsPanel = new JPanel(new GridLayout(1, 3, 4, 4));
+        neuronActionsPanel.setBorder(BorderFactory.createEmptyBorder(2, 2, 4, 2));
+
+        neuronActionsPanel.add(deleteSelectedButton);
+        neuronActionsPanel.add(addNeuronButton);
+        neuronActionsPanel.add(undoButton);
+
+        neuronPanel.add(neuronActionsPanel, BorderLayout.NORTH);
+        neuronPanel.add(new JScrollPane(roiList), BorderLayout.CENTER);
+
+        wrapper.add(topPanel, BorderLayout.NORTH);
+        wrapper.add(neuronPanel, BorderLayout.CENTER);
 
         return wrapper;
+    }
+
+    private void saveHardwareAccelerationPreference(boolean useHardwareAcceleration) {
+        useHardwareAccelerationForRetraining = useHardwareAcceleration;
+
+        File configFile = new File(
+                System.getProperty("user.home"),
+                CONFIG_DIR_NAME + "/" + CONFIG_FILE_NAME
+        );
+
+        try {
+            Properties properties = new Properties();
+
+            if (configFile.exists()) {
+                try (FileInputStream fis = new FileInputStream(configFile)) {
+                    properties.load(fis);
+                }
+            }
+
+            properties.setProperty(
+                    CONFIG_USE_HARDWARE_ACCELERATION,
+                    Boolean.toString(useHardwareAcceleration)
+            );
+
+            configFile.getParentFile().mkdirs();
+
+            try (FileOutputStream fos = new FileOutputStream(configFile)) {
+                properties.store(fos, "Neuron Segmentation Assistant configuration");
+            }
+
+            appendLog("Hardware acceleration preference saved: " + useHardwareAcceleration);
+
+        } catch (Exception e) {
+            logError("Could not save hardware acceleration preference: " + e.getMessage());
+            IJ.handleException(e);
+        }
+    }
+
+    private void styleActionButton(JButton button, boolean primary) {
+        button.setAlignmentX(Component.CENTER_ALIGNMENT);
+        button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 34));
+        button.setFocusPainted(false);
+        button.setMargin(new Insets(6, 10, 6, 10));
+
+        if (primary) {
+            button.setFont(button.getFont().deriveFont(Font.BOLD));
+        }
     }
 
     private JPanel createBottomPanel() {
@@ -380,6 +522,10 @@ public class NeuronTransferLearningWindowCommand implements Command {
             scriptPath = properties.getProperty("script");
             retrainScriptPath = properties.getProperty("retrain_script");
 
+            useHardwareAccelerationForRetraining = Boolean.parseBoolean(
+                    properties.getProperty(CONFIG_USE_HARDWARE_ACCELERATION, "false")
+            );
+
             appendLog("Loaded config file: " + configFile.getAbsolutePath());
             appendLog("Loaded Python executable: " + pythonExe);
             appendLog("Loaded inference script: " + scriptPath);
@@ -398,6 +544,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             }
 
         } catch (Exception e) {
+            logError("Could not load configuration: " + e.getMessage());
             IJ.handleException(e);
         }
     }
@@ -469,6 +616,12 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
         try {
             initializeWorkDirForSelectedFolder();
+            initializeLogFile();
+
+            appendLog("Loaded Python executable: " + pythonExe);
+            appendLog("Loaded inference script: " + scriptPath);
+            appendLog("Loaded retraining script: " + retrainScriptPath);
+
             loadImageListFromFolder();
 
             folderLabel.setText(selectedFolder.getName());
@@ -476,6 +629,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             updateStatus("Folder selected: " + selectedFolder.getAbsolutePath());
 
         } catch (Exception e) {
+            logError("Could not load selected folder: " + e.getMessage());
             IJ.handleException(e);
             updateStatus("Could not load selected folder.");
         }
@@ -561,6 +715,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             detections.clear();
             roiListModel.clear();
             selectedDetectionIndices.clear();
+            undoState = null;
             correctionMode = false;
             addNeuronMode = false;
 
@@ -581,6 +736,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             updateButtonState();
 
         } catch (Exception e) {
+            logError("Could not load selected image: " + e.getMessage());
             IJ.handleException(e);
             updateStatus("Could not load selected image.");
         }
@@ -600,6 +756,23 @@ public class NeuronTransferLearningWindowCommand implements Command {
         detectionRunning = true;
         updateStatus("Detecting images... Please wait.");
         updateButtonState();
+
+        File activeModel = getActiveModelFile();
+
+        if (activeModel == null || !activeModel.exists()) {
+            logError("No active model found. Detection cancelled.");
+            IJ.error("No active model found. Please check the configuration or select a valid model.");
+            detectionRunning = false;
+            updateButtonState();
+            return;
+        }
+
+        appendLogSeparator();
+        appendLog("Detection process started.");
+        appendLog("Active model: " + activeModel.getAbsolutePath());
+        appendLog("Input folder: " + selectedFolder.getAbsolutePath());
+        appendLog("Detections folder: " + detectionsDir.getAbsolutePath());
+        appendLogSeparator();
 
         new Thread(() -> {
             try {
@@ -633,6 +806,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 });
 
             } catch (Exception e) {
+                logError("Detection failed: " + e.getMessage());
                 IJ.handleException(e);
 
                 SwingUtilities.invokeLater(() -> {
@@ -686,13 +860,21 @@ public class NeuronTransferLearningWindowCommand implements Command {
             throw new RuntimeException("Could not open image with ImageJ: " + imageFile.getAbsolutePath());
         }
 
-        boolean savedAsPng = new FileSaver(imp).saveAsPng(tempInputPng.getAbsolutePath());
+        try {
+            boolean savedAsPng = new FileSaver(imp).saveAsPng(tempInputPng.getAbsolutePath());
 
-        if (!savedAsPng || !tempInputPng.exists()) {
-            throw new RuntimeException("Could not save temporary PNG input for: " + imageFile.getName());
+            if (!savedAsPng || !tempInputPng.exists()) {
+                throw new RuntimeException("Could not save temporary PNG input for: " + imageFile.getName());
+            }
+        } finally {
+            imp.close();
         }
 
         File model = getActiveModelFile();
+
+        if (model == null || !model.exists()) {
+            throw new RuntimeException("No valid active model found for detection.");
+        }
 
         ProcessBuilder pb = new ProcessBuilder(
                 pythonExe,
@@ -718,7 +900,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             String line;
 
             while ((line = reader.readLine()) != null) {
-                appendLog(line);
+                logPython(line);
             }
         }
 
@@ -760,7 +942,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
         selectedDetectionIndices.clear();
         roiList.clearSelection();
 
-        addNeuronButton.setText("3.2 Add neurons");
+        addNeuronButton.setText("Add");
 
         updateStatus("Correction mode enabled. Select, move, delete or add neurons.");
         updateButtonState();
@@ -768,6 +950,11 @@ public class NeuronTransferLearningWindowCommand implements Command {
     }
 
     private void saveToTrainingSet() {
+        if (!correctionMode) {
+            IJ.error("Enable correction mode before saving corrections.");
+            return;
+        }
+
         if (currentImageFile == null || sourceImage == null) {
             IJ.error("Please select an image first.");
             return;
@@ -801,8 +988,11 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
             correctionMode = false;
             addNeuronMode = false;
+            undoState = null;
             selectedDetectionIndices.clear();
             roiList.clearSelection();
+
+            addNeuronButton.setText("Add");
 
             refreshImageStatus(currentImageFile, "annotated");
 
@@ -814,6 +1004,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             appendLog("Training dataset will be rebuilt automatically before retraining.");
 
         } catch (Exception e) {
+            logError("Could not save annotation to training set: " + e.getMessage());
             IJ.handleException(e);
             updateStatus("Could not save annotation to training set.");
         }
@@ -869,27 +1060,58 @@ public class NeuronTransferLearningWindowCommand implements Command {
         File outputModel = new File(modelsDir, modelName);
         File startModel = getActiveModelFile();
 
+        if (startModel == null || !startModel.exists()) {
+            logError("No valid starting model found. Retraining cancelled.");
+            IJ.error("No valid starting model found. Please check the configuration or select a valid model.");
+            return;
+        }
+
+        appendLogSeparator();
+        appendLog("Retraining process requested.");
+        appendLog("Training data YAML: " + dataYaml.getAbsolutePath());
+        appendLog("Starting model: " + startModel.getAbsolutePath());
+        appendLog("Output model: " + outputModel.getAbsolutePath());
+        appendLog("Training samples: " + annotatedCount);
+        appendLogSeparator();
+
         retrainingRunning = true;
         updateStatus("Retraining with " + annotatedCount + " available labelled images...");
         updateButtonState();
+
+        boolean useHardwareAcceleration =
+                useHardwareAccelerationCheckBox != null && useHardwareAccelerationCheckBox.isSelected();
 
         String finalModelName = modelName;
 
         new Thread(() -> {
             try {
-                ProcessBuilder pb = new ProcessBuilder(
-                        pythonExe,
-                        "-u",
-                        retrainScriptPath,
-                        dataYaml.getAbsolutePath(),
-                        outputModel.getAbsolutePath(),
-                        startModel.getAbsolutePath()
-                );
+                List<String> command = new ArrayList<>();
+
+                command.add(pythonExe);
+                command.add("-u");
+                command.add(retrainScriptPath);
+                command.add(dataYaml.getAbsolutePath());
+                command.add(outputModel.getAbsolutePath());
+                command.add(startModel.getAbsolutePath());
+
+                String selectedDevice;
+
+                if (useHardwareAcceleration) {
+                    selectedDevice = "auto_acceleration";
+                } else {
+                    selectedDevice = "cpu";
+                }
+
+                command.add(selectedDevice);
+
+                ProcessBuilder pb = new ProcessBuilder(command);
 
                 pb.redirectErrorStream(true);
 
                 appendLog("Running transfer learning:");
                 appendLog(String.join(" ", pb.command()));
+
+                appendLog("Requested training device: " + selectedDevice);
 
                 Process process = pb.start();
 
@@ -899,7 +1121,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                     String line;
 
                     while ((line = reader.readLine()) != null) {
-                        appendLog(line);
+                        logPython(line);
                     }
                 }
 
@@ -930,6 +1152,13 @@ public class NeuronTransferLearningWindowCommand implements Command {
                     updateStatus("Retraining completed: " + finalModelName);
                     updateButtonState();
 
+                    appendLog("Retraining completed successfully.");
+                    appendLog("Generated model: " + outputModel.getAbsolutePath());
+
+                    if (logFile != null) {
+                        appendLog("Session log saved to: " + logFile.getAbsolutePath());
+                    }
+
                     IJ.showMessage(
                             "Retraining completed",
                             "Model saved to:\n" + outputModel.getAbsolutePath()
@@ -937,6 +1166,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 });
 
             } catch (Exception e) {
+                logError("Retraining failed: " + e.getMessage());
                 IJ.handleException(e);
 
                 SwingUtilities.invokeLater(() -> {
@@ -996,7 +1226,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 ImagePlus imp = IJ.openImage(imageFile.getAbsolutePath());
 
                 if (imp == null) {
-                    appendLog("Skipping image because ImageJ could not open it: " + imageFile.getAbsolutePath());
+                    logWarning("Skipping image because ImageJ could not open it: " + imageFile.getAbsolutePath());
                     continue;
                 }
 
@@ -1004,7 +1234,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                     List<NeuronDetection> automaticDetections = readDetectionsFromCsv(detectionFile);
 
                     if (automaticDetections.isEmpty()) {
-                        appendLog("Skipping image without detections: " + imageFile.getName());
+                        logWarning("Skipping image without detections: " + imageFile.getName());
                         continue;
                     }
 
@@ -1047,7 +1277,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 String[] parts = line.split(",");
 
                 if (parts.length < 3) {
-                    appendLog("Skipping malformed CSV line: " + line);
+                    logWarning("Skipping malformed CSV line: " + line);
                     continue;
                 }
 
@@ -1124,7 +1354,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 clearDirectory(file);
 
                 if (!file.delete()) {
-                    appendLog("Warning: could not delete directory: " + file.getAbsolutePath());
+                    logWarning("Could not delete directory: " + file.getAbsolutePath());
                 }
             } else {
                 Files.deleteIfExists(file.toPath());
@@ -1163,6 +1393,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             updateStatus("Active model changed: " + selectedModel.getName());
 
         } catch (Exception e) {
+            logError("Could not change active model: " + e.getMessage());
             IJ.handleException(e);
             updateStatus("Could not change active model.");
         }
@@ -1193,7 +1424,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 }
 
             } catch (Exception e) {
-                appendLog("Could not read global active model. Falling back to base model.");
+                logWarning("Could not read global active model. Falling back to base model.");
             }
         }
 
@@ -1254,7 +1485,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
             }
 
         } catch (Exception e) {
-            appendLog("Could not read folder active model.");
+            logWarning("Could not read folder active model.");
         }
 
         return null;
@@ -1282,12 +1513,19 @@ public class NeuronTransferLearningWindowCommand implements Command {
     }
 
     private void updateModelLabel() {
+        if (modelLabel == null) {
+            return;
+        }
+
         File model = getActiveModelFile();
 
         if (model != null && model.exists()) {
             modelLabel.setText(model.getName());
+            modelLabel.setCaretPosition(0);
+            modelLabel.setToolTipText(model.getAbsolutePath());
         } else {
             modelLabel.setText("No model selected");
+            modelLabel.setToolTipText(null);
         }
     }
 
@@ -1397,6 +1635,59 @@ public class NeuronTransferLearningWindowCommand implements Command {
         return Math.max(min, Math.min(max, value));
     }
 
+    private void initializeLogFile() {
+        closeLogFile();
+
+        if (workDir == null) {
+            return;
+        }
+
+        try {
+            File logsDir = new File(workDir, "logs");
+
+            if (!logsDir.exists() && !logsDir.mkdirs()) {
+                logWarning("Could not create logs directory: " + logsDir.getAbsolutePath());
+                return;
+            }
+
+            String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+
+            logFile = new File(
+                    logsDir,
+                    "transfer_learning_session_" + timestamp + ".log"
+            );
+
+            logWriter = new PrintWriter(new FileWriter(logFile, true), true);
+
+            appendLogSeparator();
+            appendLog("Log file created: " + logFile.getAbsolutePath());
+            appendLog("Session id: " + sessionId);
+            appendLog("Selected folder: " + selectedFolder.getAbsolutePath());
+            appendLog("Work directory: " + workDir.getAbsolutePath());
+            appendLogSeparator();
+
+        } catch (Exception e) {
+            logError("Could not initialize log file: " + e.getMessage());
+            IJ.handleException(e);
+        }
+    }
+
+    private void closeLogFile() {
+        if (logWriter != null) {
+            logWriter.flush();
+            logWriter.close();
+            logWriter = null;
+        }
+    }
+
+    private String getCurrentTimestampForLog() {
+        return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date());
+    }
+
+    private void appendLogSeparator() {
+        appendLog("SYSTEM", "------------------------------------------------------------");
+    }
+
     private void updateStatus(String message) {
         int count = detections.size();
 
@@ -1412,14 +1703,46 @@ public class NeuronTransferLearningWindowCommand implements Command {
             statusLabel.setText(fullMessage);
         }
 
-        appendLog("[Transfer Learning] " + message);
+        appendLog("STATUS", message);
     }
 
-    private void appendLog(String message) {
+    private synchronized void appendLog(String message) {
+        appendLog("INFO", message);
+    }
+
+    private synchronized void appendLog(String level, String message) {
+        String timestampedMessage =
+                "[" + getCurrentTimestampForLog() + "] " +
+                        "[" + level + "] " +
+                        message;
+
         if (logTextArea != null) {
-            logTextArea.append(message + "\n");
-            logTextArea.setCaretPosition(logTextArea.getDocument().getLength());
+            SwingUtilities.invokeLater(() -> {
+                logTextArea.append(timestampedMessage + "\n");
+                logTextArea.setCaretPosition(logTextArea.getDocument().getLength());
+            });
         }
+
+        if (logWriter != null) {
+            logWriter.println(timestampedMessage);
+            logWriter.flush();
+        }
+    }
+
+    private void logInfo(String message) {
+        appendLog("INFO", message);
+    }
+
+    private void logWarning(String message) {
+        appendLog("WARNING", message);
+    }
+
+    private void logError(String message) {
+        appendLog("ERROR", message);
+    }
+
+    private void logPython(String message) {
+        appendLog("PYTHON", message);
     }
 
     private void updateButtonState() {
@@ -1431,11 +1754,19 @@ public class NeuronTransferLearningWindowCommand implements Command {
         selectFolderButton.setEnabled(!busy);
         detectImagesButton.setEnabled(hasFolder && !busy);
         correctButton.setEnabled(hasImage && hasDetections && !correctionMode && !busy);
+
         deleteSelectedButton.setEnabled(correctionMode && !selectedDetectionIndices.isEmpty() && !busy);
         addNeuronButton.setEnabled(correctionMode && !busy);
-        saveToTrainingSetButton.setEnabled(hasImage && hasDetections && !addNeuronMode && !busy);
+        undoButton.setEnabled(correctionMode && undoState != null && !busy);
+
+        saveToTrainingSetButton.setEnabled(correctionMode && hasImage && hasDetections && !busy);
+
         retrainButton.setEnabled(hasFolder && !busy);
         changeModelButton.setEnabled(!busy);
+
+        if (useHardwareAccelerationCheckBox != null) {
+            useHardwareAccelerationCheckBox.setEnabled(!busy);
+        }
     }
 
     private void updateDisplayedImage() {
@@ -1655,7 +1986,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 }
 
             } catch (Exception e) {
-                appendLog("Could not use original mask polygon for " + detection.name + ". Falling back to ellipse.");
+                logWarning("Could not use original mask polygon for " + detection.name + ". Falling back to ellipse.");
             }
         }
 
@@ -1684,7 +2015,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 );
 
                 if (polygon.size() < 6) {
-                    appendLog("Skipping invalid polygon for detection: " + detection.name);
+                    logWarning("Skipping invalid polygon for detection: " + detection.name);
                     continue;
                 }
 
@@ -1713,7 +2044,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
                 );
 
                 if (polygon.size() < 6) {
-                    appendLog("Skipping invalid polygon for detection: " + detection.name);
+                    logWarning("Skipping invalid polygon for detection: " + detection.name);
                     continue;
                 }
 
@@ -1742,6 +2073,49 @@ public class NeuronTransferLearningWindowCommand implements Command {
         }
     }
 
+    private List<NeuronDetection> copyDetections(List<NeuronDetection> source) {
+        List<NeuronDetection> copy = new ArrayList<>();
+
+        for (NeuronDetection detection : source) {
+            copy.add(new NeuronDetection(
+                    detection.name,
+                    detection.cx,
+                    detection.cy,
+                    detection.width,
+                    detection.height,
+                    detection.maskPolygon,
+                    detection.edited
+            ));
+        }
+
+        return copy;
+    }
+
+    private void saveUndoState() {
+        undoState = copyDetections(detections);
+        updateButtonState();
+    }
+
+    private void undoLastChange() {
+        if (undoState == null) {
+            updateStatus("No changes to undo.");
+            return;
+        }
+
+        detections.clear();
+        detections.addAll(copyDetections(undoState));
+
+        undoState = null;
+        selectedDetectionIndices.clear();
+        addNeuronMode = false;
+        addNeuronButton.setText("Add");
+
+        refreshAfterEditing();
+
+        updateStatus("Last change undone.");
+        appendLog("Undo applied to current image.");
+    }
+
     private void deleteSelectedDetection() {
         if (selectedDetectionIndices.isEmpty()) {
             IJ.showMessage(
@@ -1750,6 +2124,8 @@ public class NeuronTransferLearningWindowCommand implements Command {
             );
             return;
         }
+
+        saveUndoState();
 
         selectedDetectionIndices.sort((a, b) -> Integer.compare(b, a));
 
@@ -1794,6 +2170,8 @@ public class NeuronTransferLearningWindowCommand implements Command {
             }
         }
 
+        saveUndoState();
+
         detections.add(new NeuronDetection(
                 "MANUAL_" + manualIndex,
                 cx,
@@ -1811,7 +2189,7 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
     private void deleteIfExists(File file) {
         if (file.exists() && !file.delete()) {
-            appendLog("Warning: previous file could not be deleted: " + file.getAbsolutePath());
+            logWarning("Previous file could not be deleted: " + file.getAbsolutePath());
         }
     }
 
@@ -1828,14 +2206,14 @@ public class NeuronTransferLearningWindowCommand implements Command {
                     deleteDirectory(file);
                 } else {
                     if (!file.delete()) {
-                        appendLog("Warning: could not delete temp file: " + file.getAbsolutePath());
+                        logWarning("Could not delete temp file: " + file.getAbsolutePath());
                     }
                 }
             }
         }
 
         if (!directory.delete()) {
-            appendLog("Warning: could not delete temp directory: " + directory.getAbsolutePath());
+            logWarning("Could not delete temp directory: " + directory.getAbsolutePath());
         }
     }
 
@@ -1975,6 +2353,8 @@ public class NeuronTransferLearningWindowCommand implements Command {
                             movingSelected = false;
                         } else {
                             setSingleDetectionSelection(clickedIndex);
+
+                            saveUndoState();
 
                             movingSelected = true;
                             lastMoveImageX = imageX;
