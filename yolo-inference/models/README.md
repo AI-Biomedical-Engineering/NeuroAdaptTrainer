@@ -36,9 +36,15 @@ retrained_model_<name>.pt
 
 Adapted models are not versioned in the repository because they are generated from user corrections during local execution.
 
-Once generated, an adapted model can be selected from the plugin interface and used as the active model for future inference.
+Once generated, an adapted model can be selected from the plugin interface and used as the active model for future inference or further retraining.
 
-If no adapted model is selected, the system uses the base model:
+The active model is resolved in the following order:
+
+1. folder-specific active model,
+2. global active model,
+3. base model `best.pt`.
+
+If no folder-specific or global active model is available, the system uses the base model:
 
 ```text
 best.pt

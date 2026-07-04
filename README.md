@@ -65,7 +65,9 @@ Compares the base YOLO model against an adapted model using an external validati
 
 ## Transfer learning workflow
 
-The adapted model is not trained from scratch. The retraining script starts from the selected YOLO model, usually the base model `best.pt`, and continues training using the annotations generated or corrected from the plugin.
+The adapted model is not trained from scratch. Retraining starts from the currently selected active model. If the selected image folder already has an associated active model, that model is reused. Otherwise, the global active model is used. If no active model is available, the system falls back to the base model `best.pt`.
+
+The selected model is then fine-tuned using the annotations generated or corrected from the plugin.
 
 The current adaptation parameters are:
 
