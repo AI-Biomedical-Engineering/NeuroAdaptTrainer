@@ -15,6 +15,8 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Properties;
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
 
 @Plugin(type = Command.class, menuPath = "Plugins>Neuron Segmentation>Model Comparison / External Validation")
 public class NeuronModelComparisonWindowCommand implements Command {
@@ -46,6 +48,12 @@ public class NeuronModelComparisonWindowCommand implements Command {
     private JTable metricsTable;
     private DefaultTableModel metricsTableModel;
 
+    private JLabel basePlotLabel;
+    private JLabel adaptedPlotLabel;
+    private JLabel basePlotTitleLabel;
+    private JLabel adaptedPlotTitleLabel;
+    private JComboBox<String> plotSelectorComboBox;
+
     private File validationDataYaml;
     private File baseModelFile;
     private File transferLearningModelFile;
@@ -71,7 +79,8 @@ public class NeuronModelComparisonWindowCommand implements Command {
 
         frame = new JFrame("Model Comparison / External Validation");
         frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
-        frame.setSize(980, 720);
+        frame.setSize(1150, 820);
+        frame.setMinimumSize(new Dimension(1000, 700));
         frame.setLayout(new BorderLayout(8, 8));
 
         frame.add(createMainPanel(), BorderLayout.CENTER);
@@ -243,7 +252,7 @@ public class NeuronModelComparisonWindowCommand implements Command {
 
     private JPanel createResultsPanel() {
         JPanel panel = new JPanel(new BorderLayout(4, 4));
-        panel.setBorder(BorderFactory.createTitledBorder("Metrics"));
+        panel.setBorder(BorderFactory.createTitledBorder("Metrics and validation plots"));
 
         metricsTableModel = new DefaultTableModel(
                 new Object[]{"Metric", "Base model", "Adapted model", "Difference (adapted - base)"},
@@ -259,15 +268,220 @@ public class NeuronModelComparisonWindowCommand implements Command {
         metricsTable.setAutoResizeMode(JTable.AUTO_RESIZE_ALL_COLUMNS);
         metricsTable.getTableHeader().setReorderingAllowed(false);
 
-        panel.add(new JScrollPane(metricsTable), BorderLayout.CENTER);
+        JScrollPane tableScrollPane = new JScrollPane(metricsTable);
+
+        JPanel plotsPanel = createComparisonPlotsPanel();
+
+        JSplitPane resultsSplitPane = new JSplitPane(
+                JSplitPane.VERTICAL_SPLIT,
+                tableScrollPane,
+                plotsPanel
+        );
+
+        resultsSplitPane.setResizeWeight(0.42);
+        resultsSplitPane.setDividerLocation(150);
+        resultsSplitPane.setOneTouchExpandable(true);
+
+        panel.add(resultsSplitPane, BorderLayout.CENTER);
 
         JLabel hintLabel = new JLabel(
-                "The CSV file model_comparison_metrics.csv is generated in the selected output folder."
+                "The CSV file model_comparison_metrics.csv and validation plots are generated in the selected output folder."
         );
         hintLabel.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
         panel.add(hintLabel, BorderLayout.SOUTH);
 
         return panel;
+    }
+
+    private JPanel createComparisonPlotsPanel() {
+        JPanel container = new JPanel(new BorderLayout(4, 4));
+        container.setBorder(BorderFactory.createTitledBorder("Visual comparison"));
+
+        JPanel selectorPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+
+        selectorPanel.add(new JLabel("Plot:"));
+
+        plotSelectorComboBox = new JComboBox<>(new String[]{
+                "Mask precision-recall curve",
+                "Mask precision curve",
+                "Mask recall curve",
+                "Mask F1 curve",
+                "Box precision-recall curve",
+                "Confusion matrix",
+                "Normalized confusion matrix",
+                "Validation predictions batch 0",
+                "Validation labels batch 0"
+        });
+
+        plotSelectorComboBox.addActionListener(e -> loadComparisonPlots());
+
+        selectorPanel.add(plotSelectorComboBox);
+
+        JPanel plotsPanel = new JPanel(new GridLayout(1, 2, 8, 8));
+
+        JPanel basePanel = new JPanel(new BorderLayout(4, 4));
+        basePlotTitleLabel = new JLabel("Base model");
+        basePlotTitleLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        basePlotLabel = createPlotLabel();
+
+        basePanel.add(basePlotTitleLabel, BorderLayout.NORTH);
+        basePanel.add(new JScrollPane(basePlotLabel), BorderLayout.CENTER);
+
+        JPanel adaptedPanel = new JPanel(new BorderLayout(4, 4));
+        adaptedPlotTitleLabel = new JLabel("Adapted model");
+        adaptedPlotTitleLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        adaptedPlotLabel = createPlotLabel();
+
+        adaptedPanel.add(adaptedPlotTitleLabel, BorderLayout.NORTH);
+        adaptedPanel.add(new JScrollPane(adaptedPlotLabel), BorderLayout.CENTER);
+
+        plotsPanel.add(basePanel);
+        plotsPanel.add(adaptedPanel);
+
+        container.add(selectorPanel, BorderLayout.NORTH);
+        container.add(plotsPanel, BorderLayout.CENTER);
+
+        return container;
+    }
+
+    private void loadComparisonPlots() {
+        if (outputDir == null || basePlotLabel == null || adaptedPlotLabel == null) {
+            return;
+        }
+
+        File baseRunDir = new File(outputDir, "base_model_validation");
+        File adaptedRunDir = new File(outputDir, "adapted_model_validation");
+
+        String selectedPlotName = getSelectedPlotFileName();
+
+        File basePlot = findPlot(baseRunDir, selectedPlotName);
+        File adaptedPlot = findPlot(adaptedRunDir, selectedPlotName);
+
+        setPlotImage(basePlotLabel, basePlotTitleLabel, basePlot, "Base model", selectedPlotName);
+        setPlotImage(adaptedPlotLabel, adaptedPlotTitleLabel, adaptedPlot, "Adapted model", selectedPlotName);
+
+        if (basePlot != null) {
+            appendLog("Base model plot loaded: " + basePlot.getAbsolutePath());
+        } else {
+            appendLog("Base model plot not found: " + selectedPlotName);
+        }
+
+        if (adaptedPlot != null) {
+            appendLog("Adapted model plot loaded: " + adaptedPlot.getAbsolutePath());
+        } else {
+            appendLog("Adapted model plot not found: " + selectedPlotName);
+        }
+    }
+
+    private String getSelectedPlotFileName() {
+        if (plotSelectorComboBox == null || plotSelectorComboBox.getSelectedItem() == null) {
+            return "MaskPR_curve.png";
+        }
+
+        String selected = plotSelectorComboBox.getSelectedItem().toString();
+
+        switch (selected) {
+            case "Mask precision curve":
+                return "MaskP_curve.png";
+            case "Mask recall curve":
+                return "MaskR_curve.png";
+            case "Mask F1 curve":
+                return "MaskF1_curve.png";
+            case "Box precision-recall curve":
+                return "BoxPR_curve.png";
+            case "Confusion matrix":
+                return "confusion_matrix.png";
+            case "Normalized confusion matrix":
+                return "confusion_matrix_normalized.png";
+            case "Validation predictions batch 0":
+                return "val_batch0_pred.jpg";
+            case "Validation labels batch 0":
+                return "val_batch0_labels.jpg";
+            case "Mask precision-recall curve":
+            default:
+                return "MaskPR_curve.png";
+        }
+    }
+
+    private File findPlot(File runDir, String fileName) {
+        if (runDir == null || !runDir.exists()) {
+            return null;
+        }
+
+        File candidate = new File(runDir, fileName);
+
+        if (candidate.exists() && candidate.isFile()) {
+            return candidate;
+        }
+
+        return null;
+    }
+
+    private void setPlotImage(
+            JLabel imageLabel,
+            JLabel titleLabel,
+            File imageFile,
+            String titlePrefix,
+            String expectedFileName
+    ) {
+        if (imageLabel == null || titleLabel == null) {
+            return;
+        }
+
+        if (imageFile == null || !imageFile.exists()) {
+            imageLabel.setIcon(null);
+            imageLabel.setText("Plot not found: " + expectedFileName);
+            titleLabel.setText(titlePrefix);
+            imageLabel.setToolTipText(null);
+            return;
+        }
+
+        try {
+            BufferedImage image = ImageIO.read(imageFile);
+
+            if (image == null) {
+                imageLabel.setIcon(null);
+                imageLabel.setText("Could not read image");
+                titleLabel.setText(titlePrefix);
+                return;
+            }
+
+            int maxWidth = imageLabel.getWidth() > 50 ? imageLabel.getWidth() - 20 : 430;
+            int maxHeight = imageLabel.getHeight() > 50 ? imageLabel.getHeight() - 20 : 260;
+
+            double scale = Math.min(
+                    (double) maxWidth / image.getWidth(),
+                    (double) maxHeight / image.getHeight()
+            );
+
+            scale = Math.min(scale, 1.0);
+
+            int newWidth = Math.max(1, (int) (image.getWidth() * scale));
+            int newHeight = Math.max(1, (int) (image.getHeight() * scale));
+
+            Image scaledImage = image.getScaledInstance(newWidth, newHeight, Image.SCALE_SMOOTH);
+
+            imageLabel.setText(null);
+            imageLabel.setIcon(new ImageIcon(scaledImage));
+            imageLabel.setToolTipText(imageFile.getAbsolutePath());
+
+            titleLabel.setText(titlePrefix + ": " + imageFile.getName());
+
+        } catch (Exception e) {
+            imageLabel.setIcon(null);
+            imageLabel.setText("Could not load plot");
+            titleLabel.setText(titlePrefix);
+            logError("Could not load plot image: " + imageFile.getAbsolutePath() + " - " + e.getMessage());
+        }
+    }
+
+    private JLabel createPlotLabel() {
+        JLabel label = new JLabel("No plot loaded", SwingConstants.CENTER);
+        label.setVerticalAlignment(SwingConstants.CENTER);
+        label.setHorizontalAlignment(SwingConstants.CENTER);
+        label.setPreferredSize(new Dimension(430, 260));
+        label.setBorder(BorderFactory.createLineBorder(Color.LIGHT_GRAY));
+        return label;
     }
 
     private JPanel createLogPanel() {
@@ -607,6 +821,7 @@ public class NeuronModelComparisonWindowCommand implements Command {
         updateFields();
         updateStatus("Output folder selected.");
         updateButtonState();
+        loadComparisonPlots();
     }
 
     private void runComparison() {
@@ -709,6 +924,8 @@ public class NeuronModelComparisonWindowCommand implements Command {
 
         metricsTableModel.setRowCount(0);
 
+        clearComparisonPlots();
+
         comparisonRunning = true;
         updateStatus("Running external validation comparison...");
         updateButtonState();
@@ -775,6 +992,7 @@ public class NeuronModelComparisonWindowCommand implements Command {
                 SwingUtilities.invokeLater(() -> {
                     comparisonRunning = false;
                     fillMetricsTable(rows);
+                    loadComparisonPlots();
                     updateStatus("Model comparison completed.");
                     updateButtonState();
 
@@ -798,6 +1016,28 @@ public class NeuronModelComparisonWindowCommand implements Command {
                 });
             }
         }).start();
+    }
+
+    private void clearComparisonPlots() {
+        if (basePlotLabel != null) {
+            basePlotLabel.setIcon(null);
+            basePlotLabel.setText("No plot loaded");
+            basePlotLabel.setToolTipText(null);
+        }
+
+        if (adaptedPlotLabel != null) {
+            adaptedPlotLabel.setIcon(null);
+            adaptedPlotLabel.setText("No plot loaded");
+            adaptedPlotLabel.setToolTipText(null);
+        }
+
+        if (basePlotTitleLabel != null) {
+            basePlotTitleLabel.setText("Base model");
+        }
+
+        if (adaptedPlotTitleLabel != null) {
+            adaptedPlotTitleLabel.setText("Adapted model");
+        }
     }
 
     private int countSupportedImages(File directory) {
