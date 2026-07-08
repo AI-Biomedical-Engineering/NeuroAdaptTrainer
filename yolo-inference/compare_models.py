@@ -24,19 +24,42 @@ import torch
 
 DEFAULT_IMGSZ = 640
 DEFAULT_BATCH = 1
+DEFAULT_WORKERS = 0
+PRIMARY_METRIC = "metrics/mAP50(M)"
+FALLBACK_METRICS = [
+    "metrics/mAP50(M)",
+    "metrics/mAP50(B)",
+    "metrics/mAP50-95(M)",
+    "metrics/mAP50-95(B)",
+]
 
 
 PREFERRED_METRICS = [
-    "metrics/precision(B)",
-    "metrics/recall(B)",
-    "metrics/mAP50(B)",
-    "metrics/mAP50-95(B)",
     "metrics/precision(M)",
     "metrics/recall(M)",
     "metrics/mAP50(M)",
     "metrics/mAP50-95(M)",
+    "metrics/precision(B)",
+    "metrics/recall(B)",
+    "metrics/mAP50(B)",
+    "metrics/mAP50-95(B)",
     "fitness",
 ]
+
+
+def cuda_is_usable():
+    if not torch.cuda.is_available():
+        return False
+
+    try:
+        _ = torch.zeros(1, device="cuda")
+        return True
+    except Exception as e:
+        print(
+            f"CUDA is available but could not be used: {e}. Falling back to CPU.",
+            flush=True
+        )
+        return False
 
 
 def resolve_device(device):
@@ -44,7 +67,7 @@ def resolve_device(device):
         return None
 
     if device == "auto_acceleration":
-        if torch.cuda.is_available():
+        if cuda_is_usable():
             return "cuda"
 
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -52,6 +75,13 @@ def resolve_device(device):
 
         print(
             "Hardware acceleration was requested, but CUDA/MPS is not available. Falling back to CPU.",
+            flush=True
+        )
+        return "cpu"
+
+    if device == "cuda" and not cuda_is_usable():
+        print(
+            "CUDA was requested but is not usable. Falling back to CPU.",
             flush=True
         )
         return "cpu"
@@ -73,6 +103,7 @@ def validate_model(model_path, data_yaml, output_dir, run_name, device=None):
         "data": str(data_yaml),
         "imgsz": DEFAULT_IMGSZ,
         "batch": DEFAULT_BATCH,
+        "workers": DEFAULT_WORKERS,
         "plots": True,
         "save_json": False,
         "project": str(output_dir),
@@ -142,7 +173,7 @@ def pick_metric(metrics, names):
     return None, None
 
 
-def write_summary(output_file, base_metrics, adapted_metrics, resolved_device):
+def write_summary(output_file, base_model, adapted_model, data_yaml, base_metrics, adapted_metrics, requested_device, resolved_device):
     rows = []
 
     for metric_name in PREFERRED_METRICS:
@@ -160,17 +191,22 @@ def write_summary(output_file, base_metrics, adapted_metrics, resolved_device):
 
             rows.append((metric_name, base_value, adapted_value, difference))
 
-    best_map_name, adapted_map = pick_metric(
-        adapted_metrics,
-        ["metrics/mAP50(M)", "metrics/mAP50(B)", "metrics/mAP50-95(M)", "metrics/mAP50-95(B)"]
-    )
+    best_map_name, adapted_map = pick_metric(adapted_metrics, FALLBACK_METRICS)
 
     base_map = base_metrics.get(best_map_name, None) if best_map_name else None
 
     with open(output_file, "w", encoding="utf-8") as f:
         f.write("Model comparison summary\n")
         f.write("========================\n\n")
-        f.write(f"Resolved device: {resolved_device if resolved_device else 'auto'}\n\n")
+        f.write(f"Base model: {base_model}\n")
+        f.write(f"Adapted model: {adapted_model}\n")
+        f.write(f"Validation data: {data_yaml}\n")
+        f.write(f"Requested device: {requested_device if requested_device else 'auto'}\n")
+        f.write(f"Resolved device: {resolved_device if resolved_device else 'auto'}\n")
+        f.write(f"Image size: {DEFAULT_IMGSZ}\n")
+        f.write(f"Batch size: {DEFAULT_BATCH}\n")
+        f.write(f"Workers: {DEFAULT_WORKERS}\n\n")
+        f.write(f"Preferred primary metric: {PRIMARY_METRIC}\n\n")
 
         if best_map_name is not None:
             f.write(f"Main metric: {best_map_name}\n")
@@ -246,6 +282,8 @@ def main():
         print(f"RESOLVED_DEVICE: {resolved_device if resolved_device else 'auto'}", flush=True)
         print(f"IMGSZ: {DEFAULT_IMGSZ}", flush=True)
         print(f"BATCH: {DEFAULT_BATCH}", flush=True)
+        print(f"WORKERS: {DEFAULT_WORKERS}", flush=True)
+        print(f"PRIMARY_METRIC: {PRIMARY_METRIC}", flush=True)
 
         print("\nValidating base model...", flush=True)
         base_metrics = validate_model(
@@ -269,7 +307,16 @@ def main():
         output_summary = output_dir / "model_comparison_summary.txt"
 
         write_metrics_csv(output_csv, base_metrics, adapted_metrics)
-        write_summary(output_summary, base_metrics, adapted_metrics, resolved_device)
+        write_summary(
+            output_summary,
+            base_model,
+            adapted_model,
+            data_yaml,
+            base_metrics,
+            adapted_metrics,
+            requested_device,
+            resolved_device
+        )
 
         print("\nComparison completed.", flush=True)
         print(f"Metrics saved to: {output_csv}", flush=True)
