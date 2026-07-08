@@ -52,6 +52,10 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
     private JButton fitButton;
     private JButton actualSizeButton;
 
+    private JCheckBox useHardwareAccelerationCheckBox;
+    private boolean useHardwareAccelerationForInference = false;
+    private static final String CONFIG_USE_HARDWARE_ACCELERATION = "use_hardware_acceleration";
+
     private ImagePlus sourceImage;
     private ImagePlus imageToDisplay;
 
@@ -177,6 +181,10 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
             pythonExe = properties.getProperty("python");
             scriptPath = properties.getProperty("script");
 
+            useHardwareAccelerationForInference = Boolean.parseBoolean(
+                    properties.getProperty(CONFIG_USE_HARDWARE_ACCELERATION, "false")
+            );
+
             if (pythonExe == null || pythonExe.trim().isEmpty()) {
                 IJ.error("Configuration error", "Missing property: python");
                 return;
@@ -189,6 +197,7 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
 
             logToConsole("Loaded Python executable: " + pythonExe);
             logToConsole("Loaded inference script: " + scriptPath);
+            logToConsole("Use hardware acceleration: " + useHardwareAccelerationForInference);
 
             activeModelFile = getGlobalActiveModelOrBaseModel();
 
@@ -370,8 +379,37 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         styleActionButton(changeModelButton, false);
         changeModelButton.addActionListener(e -> changeActiveModel());
 
+        useHardwareAccelerationCheckBox = new JCheckBox("Use hardware acceleration");
+        useHardwareAccelerationCheckBox.setSelected(useHardwareAccelerationForInference);
+        useHardwareAccelerationCheckBox.setFont(
+                useHardwareAccelerationCheckBox.getFont().deriveFont(Font.PLAIN, 11f)
+        );
+        useHardwareAccelerationCheckBox.setToolTipText(
+                "If enabled, inference will request CUDA or Apple MPS when available."
+        );
+
+        useHardwareAccelerationCheckBox.addActionListener(e -> {
+            saveHardwareAccelerationPreference(useHardwareAccelerationCheckBox.isSelected());
+
+            if (useHardwareAccelerationCheckBox.isSelected()) {
+                updateStatus("Hardware acceleration enabled for inference.");
+            } else {
+                updateStatus("CPU inference selected.");
+            }
+        });
+
+        JPanel modelBottomPanel = new JPanel();
+        modelBottomPanel.setLayout(new BoxLayout(modelBottomPanel, BoxLayout.Y_AXIS));
+
+        changeModelButton.setAlignmentX(Component.CENTER_ALIGNMENT);
+        useHardwareAccelerationCheckBox.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        modelBottomPanel.add(changeModelButton);
+        modelBottomPanel.add(Box.createVerticalStrut(4));
+        modelBottomPanel.add(useHardwareAccelerationCheckBox);
+
         modelPanel.add(modelLabel, BorderLayout.CENTER);
-        modelPanel.add(changeModelButton, BorderLayout.SOUTH);
+        modelPanel.add(modelBottomPanel, BorderLayout.SOUTH);
 
         JPanel actionsPanel = new JPanel();
         actionsPanel.setLayout(new BoxLayout(actionsPanel, BoxLayout.Y_AXIS));
@@ -399,6 +437,41 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
         wrapper.add(contentPanel, BorderLayout.NORTH);
 
         return wrapper;
+    }
+
+    private void saveHardwareAccelerationPreference(boolean useHardwareAcceleration) {
+        useHardwareAccelerationForInference = useHardwareAcceleration;
+
+        File configFile = new File(
+                System.getProperty("user.home"),
+                ".neuron-segmentation-assistant/config.properties"
+        );
+
+        try {
+            Properties properties = new Properties();
+
+            if (configFile.exists()) {
+                try (FileInputStream fis = new FileInputStream(configFile)) {
+                    properties.load(fis);
+                }
+            }
+
+            properties.setProperty(
+                    CONFIG_USE_HARDWARE_ACCELERATION,
+                    Boolean.toString(useHardwareAcceleration)
+            );
+
+            configFile.getParentFile().mkdirs();
+
+            try (FileOutputStream fos = new FileOutputStream(configFile)) {
+                properties.store(fos, "Neuron Segmentation Assistant configuration");
+            }
+
+            logToConsole("Hardware acceleration preference saved: " + useHardwareAcceleration);
+
+        } catch (Exception e) {
+            IJ.handleException(e);
+        }
     }
 
     private void styleActionButton(JButton button, boolean primary) {
@@ -478,6 +551,10 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
 
         if (openTransferLearningButton != null) {
             openTransferLearningButton.setEnabled(!busy);
+        }
+
+        if (useHardwareAccelerationCheckBox != null) {
+            useHardwareAccelerationCheckBox.setEnabled(!busy);
         }
     }
 
@@ -604,14 +681,25 @@ public class NeuronSegmentationAssistantWindowCommand implements Command, ImageL
             throw new RuntimeException("Active model not found.");
         }
 
+        String selectedDevice;
+
+        if (useHardwareAccelerationCheckBox != null && useHardwareAccelerationCheckBox.isSelected()) {
+            selectedDevice = "auto_acceleration";
+        } else {
+            selectedDevice = "cpu";
+        }
+
         ProcessBuilder pb = new ProcessBuilder(
                 pythonExe,
                 "-u",
                 scriptPath,
                 inputFile.getAbsolutePath(),
                 outputFile.getAbsolutePath(),
-                modelFile.getAbsolutePath()
+                modelFile.getAbsolutePath(),
+                selectedDevice
         );
+
+        logToConsole("Requested inference device: " + selectedDevice);
 
         pb.redirectErrorStream(true);
 

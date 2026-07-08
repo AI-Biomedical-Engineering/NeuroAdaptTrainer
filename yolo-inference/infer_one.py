@@ -8,7 +8,13 @@ an output path), runs segmentation inference, applies post-processing
 neurons marked as circles.
 
 Intended usage:
-    python infer_one.py <input_image_path> [output_image_path]
+    python infer_one.py <input_image_path> [output_image_path] [model_path] [device]
+
+Device values:
+    cpu
+    cuda
+    mps
+    auto_acceleration
 
 If an output path is provided (e.g., from Fiji), the processed image
 is written there. Additionally, a stable and a timestamped output are
@@ -20,6 +26,7 @@ import sys
 import cv2
 import numpy as np
 import traceback
+import torch
 
 # -----------------------------------------------------------------------------
 # Paths
@@ -35,7 +42,7 @@ def resolve_model_path():
     Resolve the model path used for inference.
 
     Usage:
-        python infer_one.py <image_path> [output_path] [model_path]
+        python infer_one.py <image_path> [output_path] [model_path] [device]
 
     If model_path is provided, it is used.
     Otherwise, the base model is used.
@@ -44,6 +51,63 @@ def resolve_model_path():
         return Path(sys.argv[3]).expanduser().resolve()
 
     return BASE_MODEL_PATH
+
+def cuda_is_usable():
+    if not torch.cuda.is_available():
+        return False
+
+    try:
+        _ = torch.zeros(1, device="cuda")
+        return True
+    except Exception as e:
+        print(
+            f"CUDA is available but could not be used: {e}. Falling back to CPU.",
+            flush=True
+        )
+        return False
+
+def mps_is_usable():
+    if not hasattr(torch.backends, "mps"):
+        return False
+
+    if not torch.backends.mps.is_available():
+        return False
+
+    try:
+        _ = torch.zeros(1, device="mps")
+        return True
+    except Exception as e:
+        print(
+            f"MPS is available but could not be used: {e}. Falling back to CPU.",
+            flush=True
+        )
+        return False
+
+def resolve_device(device):
+    if device is None:
+        return None
+
+    if device == "auto_acceleration":
+        if cuda_is_usable():
+            return "cuda"
+
+        if mps_is_usable():
+            return "mps"
+
+        print(
+            "Hardware acceleration was requested, but CUDA/MPS is not available. Falling back to CPU.",
+            flush=True
+        )
+        return "cpu"
+
+    if device == "cuda" and not cuda_is_usable():
+        print(
+            "CUDA was requested but is not usable. Falling back to CPU.",
+            flush=True
+        )
+        return "cpu"
+
+    return device
 
 # -----------------------------------------------------------------------------
 # Inference / Visualization configuration
@@ -302,7 +366,7 @@ def main():
     """
     try:
         if len(sys.argv) < 2:
-            print("Usage: python infer_one.py <image_path> [output_path]", file=sys.stderr, flush=True)
+            print("Usage: python infer_one.py <image_path> [output_path] [model_path] [device]", file=sys.stderr, flush=True)
             sys.exit(2)
 
         image_path = Path(sys.argv[1]).expanduser().resolve()
@@ -311,6 +375,13 @@ def main():
             sys.exit(2)
             
         model_path = resolve_model_path()
+        
+        if len(sys.argv) >= 5:
+            requested_device = sys.argv[4]
+        else:
+            requested_device = None
+
+        resolved_device = resolve_device(requested_device)
 
         if not model_path.exists():
             print(f"Model not found: {model_path}", file=sys.stderr, flush=True)
@@ -330,20 +401,27 @@ def main():
         print(f"MODEL: {model_path}", flush=True)
         print(f"INPUT: {image_path}", flush=True)
         print(f"ULTRA_DIR: {stable_dir}", flush=True)
-
+        print(f"REQUESTED_DEVICE: {requested_device if requested_device else 'ultralytics_default'}", flush=True)
+        print(f"RESOLVED_DEVICE: {resolved_device if resolved_device else 'ultralytics_default'}", flush=True)
+        
         model = YOLO(str(model_path))
 
         # Run YOLO inference (do not save Ultralytics default images; we draw our own output)
-        results = model.predict(
-            source=str(image_path),
-            imgsz=IMG_SIZE,
-            conf=CONF_THRES,
-            save=False,
-            verbose=False,
-            project=str(stable_dir),
-            name="ultralytics_tmp",
-            exist_ok=True,
-        )
+        predict_args = {
+            "source": str(image_path),
+            "imgsz": IMG_SIZE,
+            "conf": CONF_THRES,
+            "save": False,
+            "verbose": False,
+            "project": str(stable_dir),
+            "name": "ultralytics_tmp",
+            "exist_ok": True,
+        }
+
+        if resolved_device:
+            predict_args["device"] = resolved_device
+
+        results = model.predict(**predict_args)
 
         r = results[0]
 

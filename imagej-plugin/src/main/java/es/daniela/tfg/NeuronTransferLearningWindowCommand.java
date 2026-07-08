@@ -300,16 +300,16 @@ public class NeuronTransferLearningWindowCommand implements Command {
         useHardwareAccelerationCheckBox.setSelected(useHardwareAccelerationForRetraining);
         useHardwareAccelerationCheckBox.setFont(useHardwareAccelerationCheckBox.getFont().deriveFont(Font.PLAIN, 11f));
         useHardwareAccelerationCheckBox.setToolTipText(
-                "If enabled, retraining will request the best available hardware acceleration."
+                "If enabled, detection and retraining will request the best available hardware acceleration."
         );
 
         useHardwareAccelerationCheckBox.addActionListener(e -> {
             saveHardwareAccelerationPreference(useHardwareAccelerationCheckBox.isSelected());
 
             if (useHardwareAccelerationCheckBox.isSelected()) {
-                updateStatus("Hardware acceleration enabled for retraining.");
+                updateStatus("Hardware acceleration enabled for detection and retraining.");
             } else {
-                updateStatus("CPU retraining selected.");
+                updateStatus("CPU selected for detection and retraining.");
             }
         });
 
@@ -907,14 +907,25 @@ public class NeuronTransferLearningWindowCommand implements Command {
             throw new RuntimeException("No valid active model found for detection.");
         }
 
+        String selectedDevice;
+
+        if (useHardwareAccelerationCheckBox != null && useHardwareAccelerationCheckBox.isSelected()) {
+            selectedDevice = "auto_acceleration";
+        } else {
+            selectedDevice = "cpu";
+        }
+
         ProcessBuilder pb = new ProcessBuilder(
                 pythonExe,
                 "-u",
                 scriptPath,
                 tempInputPng.getAbsolutePath(),
                 tempOutputPng.getAbsolutePath(),
-                model.getAbsolutePath()
+                model.getAbsolutePath(),
+                selectedDevice
         );
+
+        appendLog("Requested inference device: " + selectedDevice);
 
         pb.redirectErrorStream(true);
 
