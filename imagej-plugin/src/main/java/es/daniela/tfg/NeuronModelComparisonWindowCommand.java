@@ -431,13 +431,30 @@ public class NeuronModelComparisonWindowCommand implements Command {
     }
 
     private boolean isSupportedImage(File file) {
-        String name = file.getName().toLowerCase(java.util.Locale.ROOT);
+        if (file == null || !file.isFile()) {
+            return false;
+        }
 
-        return name.endsWith(".png") ||
-                name.endsWith(".jpg") ||
-                name.endsWith(".jpeg") ||
-                name.endsWith(".tif") ||
-                name.endsWith(".tiff");
+        String name = file.getName();
+        String lowerName = name.toLowerCase(java.util.Locale.ROOT);
+
+        if (name.startsWith("._") ||
+                name.startsWith(".") ||
+                lowerName.equals("thumbs.db") ||
+                lowerName.equals("desktop.ini") ||
+                lowerName.equals(".ds_store")) {
+            return false;
+        }
+
+        if (file.isHidden()) {
+            return false;
+        }
+
+        return lowerName.endsWith(".png") ||
+                lowerName.endsWith(".jpg") ||
+                lowerName.endsWith(".jpeg") ||
+                lowerName.endsWith(".tif") ||
+                lowerName.endsWith(".tiff");
     }
 
     private String getBaseName(File file) {

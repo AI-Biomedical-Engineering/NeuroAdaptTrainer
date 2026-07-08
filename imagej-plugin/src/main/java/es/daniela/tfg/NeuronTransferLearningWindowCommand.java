@@ -614,6 +614,8 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
         selectedFolder = chooser.getSelectedFile();
 
+        removeMacMetadataFiles(selectedFolder);
+
         try {
             initializeWorkDirForSelectedFolder();
             initializeLogFile();
@@ -635,6 +637,30 @@ public class NeuronTransferLearningWindowCommand implements Command {
         }
 
         updateButtonState();
+    }
+
+    private void removeMacMetadataFiles(File folder) {
+        if (folder == null || !folder.exists() || !folder.isDirectory()) {
+            return;
+        }
+
+        File[] files = folder.listFiles();
+
+        if (files == null) {
+            return;
+        }
+
+        for (File file : files) {
+            String name = file.getName();
+
+            if (name.startsWith("._") || name.equals(".DS_Store")) {
+                if (!file.delete()) {
+                    logWarning("Could not delete macOS metadata file: " + file.getAbsolutePath());
+                } else {
+                    appendLog("Deleted macOS metadata file: " + file.getName());
+                }
+            }
+        }
     }
 
     private void initializeWorkDirForSelectedFolder() throws IOException {
@@ -702,6 +728,11 @@ public class NeuronTransferLearningWindowCommand implements Command {
 
     private void loadImageEntry(ImageEntry entry) {
         try {
+            if (entry == null || !isSupportedImage(entry.file)) {
+                updateStatus("Unsupported or hidden image skipped.");
+                return;
+            }
+
             currentImageFile = entry.file;
             sourceImage = IJ.openImage(currentImageFile.getAbsolutePath());
 
@@ -1607,13 +1638,32 @@ public class NeuronTransferLearningWindowCommand implements Command {
     }
 
     private boolean isSupportedImage(File file) {
-        String name = file.getName().toLowerCase(Locale.ROOT);
+        if (file == null || !file.isFile()) {
+            return false;
+        }
 
-        return name.endsWith(".png") ||
-                name.endsWith(".jpg") ||
-                name.endsWith(".jpeg") ||
-                name.endsWith(".tif") ||
-                name.endsWith(".tiff");
+        String name = file.getName();
+        String lowerName = name.toLowerCase(Locale.ROOT);
+
+        // Ignore macOS AppleDouble/resource fork files and common system files.
+        // Example: ._418L.jpg is not a real image, even if it ends with .jpg.
+        if (name.startsWith("._") ||
+                name.startsWith(".") ||
+                lowerName.equals("thumbs.db") ||
+                lowerName.equals("desktop.ini") ||
+                lowerName.equals(".ds_store")) {
+            return false;
+        }
+
+        if (file.isHidden()) {
+            return false;
+        }
+
+        return lowerName.endsWith(".png") ||
+                lowerName.endsWith(".jpg") ||
+                lowerName.endsWith(".jpeg") ||
+                lowerName.endsWith(".tif") ||
+                lowerName.endsWith(".tiff");
     }
 
     private String getBaseName(File file) {
