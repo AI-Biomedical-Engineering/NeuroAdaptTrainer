@@ -125,6 +125,7 @@ yolo-inference/outputs/
 # ------------------------------------------------------------
 
 yolo-inference/models/best_adapted.pt
+yolo-inference/models/*.pt
 .neuron-segmentation-assistant/
 transfer-learning-data/
 
