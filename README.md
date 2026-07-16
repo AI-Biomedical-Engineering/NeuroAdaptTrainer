@@ -222,3 +222,7 @@ The Fiji/ImageJ plugin is developed in Java and built with Maven.
 This tool is intended as an assisted workflow for neuron segmentation. The model provides an initial automatic prediction, but the user can review and correct detections before using them for transfer learning or validation.
 
 The annotations generated during correction are used as technical reference annotations. A complete biological validation would require review by domain specialists.
+
+## License
+
+This project is licensed under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). See the LICENSE file for details.
