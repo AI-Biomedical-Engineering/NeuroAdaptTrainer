@@ -1,5 +1,5 @@
-# Fiji YOLO Neuron Segmentation
-Fiji/ImageJ plugin for YOLO-based neuron segmentation in microscopy images.
+# NeuroAdaptTrainer
+NeuroAdaptTrainer is a Fiji/ImageJ plugin that integrates a YOLO segmentation model to assist neuron segmentation, interactive correction, transfer learning and model comparison in microscopy images.
 This project integrates a YOLO segmentation model into Fiji/ImageJ to assist neuron detection, manual correction, transfer learning and external model validation.
 ## Main features
 - Single-image neuron segmentation from Fiji/ImageJ.
